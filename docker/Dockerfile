@@ -49,6 +49,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         openssh-client \
         libcap2-bin \
         tini \
+        nodejs \
     && rm -rf /var/lib/apt/lists/*
 
 # supervisord for the single-container "quick start" path only (compose
@@ -101,6 +102,7 @@ RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/entrypoint-web.sh \
                 /usr/local/bin/entrypoint-single.sh \
                 /app/docker/updater/upgrade.sh \
     && mkdir -p /app/data \
+    && ln -s /app /opt/anetbbs \
     && chown -R anetbbs:anetbbs /app /home/anetbbs
 
 ENV PYTHONUNBUFFERED=1 \

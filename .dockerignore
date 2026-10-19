@@ -30,7 +30,6 @@ instance/
 # DOS/Mystic/door-game vendor trees -- excluded from the image for v1
 # (see docs/22-containers.md's "unsupported in Docker for now" list)
 doors/
-vendor/
 
 # js-dos runtime WASM binary, fetched separately by tools/download_jsdos.sh
 anetbbs/static/js-dos/
