@@ -1,0 +1,276 @@
+{% extends "base.html" %}
+{% block title %}BinkP Node: {{ node.ftn_address }} — {{ config.BBS_NAME }}{% endblock %}
+
+{% block content %}
+<div class="bbs-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+    <div>
+        <h1><i class="bi bi-hdd-network"></i> {{ node.ftn_address }}</h1>
+        <p>{{ node.name }}{% if node.sysop %} — Sysop: {{ node.sysop }}{% endif %}</p>
+    </div>
+    <div class="d-flex gap-2 flex-wrap">
+        {% if node.binkp_host %}
+        <form method="post" action="{{ url_for('hub_admin.poll_binkp_node', node_id=node.id) }}" class="d-inline">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button type="submit" class="btn btn-primary" title="Dial out to this node now and push its hold queue">
+                <i class="bi bi-arrow-repeat"></i> Poll Now
+            </button>
+        </form>
+        {% else %}
+        <button type="button" class="btn btn-primary" disabled
+               title="No BinkP host set on this node -- it can only poll in. Set a host on the edit form to enable this.">
+            <i class="bi bi-arrow-repeat"></i> Poll Now
+        </button>
+        {% endif %}
+        <a href="{{ url_for('hub_admin.edit_binkp_node', node_id=node.id) }}" class="btn btn-secondary">Edit</a>
+        <a href="{{ url_for('hub_admin.binkp_nodes') }}" class="btn btn-secondary">
+            <i class="bi bi-arrow-left"></i> Back
+        </a>
+    </div>
+    {% if not node.binkp_host %}
+    <div class="w-100"></div>
+    <div class="text-muted small">
+        <i class="bi bi-info-circle"></i> Poll Now is disabled -- no BinkP host set on this node, so it can only poll in. <a href="{{ url_for('hub_admin.edit_binkp_node', node_id=node.id) }}">Set a host</a> to enable it.
+    </div>
+    {% endif %}
+</div>
+
+{% with messages = get_flashed_messages(with_categories=true) %}
+{% for cat, msg in messages %}
+<div class="alert alert-{{ cat }} alert-dismissible fade show">{{ msg }}
+    <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+</div>{% endfor %}{% endwith %}
+
+<div class="row g-3 mb-4">
+    <div class="col-md-4">
+        <div class="card h-100">
+            <div class="card-header">Node Info</div>
+            <div class="card-body">
+                <table class="table table-sm mb-0">
+                    <tr><th>FTN Address</th><td><code>{{ node.ftn_address }}</code></td></tr>
+                    <tr><th>Network</th><td>
+                        {% if node.network %}{{ node.network.name }}
+                        {% else %}<span class="text-muted">(auto -- resolved from hub identity)</span>{% endif %}
+                    </td></tr>
+                    <tr><th>System</th><td>{{ node.system_name or '—' }}</td></tr>
+                    <tr><th>Location</th><td>{{ node.location or '—' }}</td></tr>
+                    <tr><th>Email</th><td>{{ node.email or '—' }}</td></tr>
+                    <tr><th>Password</th><td><code>{{ node.password }}</code></td></tr>
+                    <tr><th>Status</th><td>
+                        {% if node.is_active %}<span class="badge bg-success">active</span>
+                        {% else %}<span class="badge bg-secondary">inactive</span>{% endif %}
+                    </td></tr>
+                    <tr><th>Last Seen</th><td>
+                        {% if node.last_seen_at %}{{ node.last_seen_at|eastern('%Y-%m-%d %H:%M %Z') }}
+                        {% else %}<span class="text-muted">never connected</span>{% endif %}
+                    </td></tr>
+                    <tr><th>Areas</th><td>{{ node.subscriptions.count() }}</td></tr>
+                    <tr><th>Pending Queue</th><td>
+                        <a href="{{ url_for('hub_admin.hold_queue', node_id=node.id) }}">{{ pending_count }}</a>
+                    </td></tr>
+                </table>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-8">
+        <div class="card h-100">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <span><i class="bi bi-chat-square-text"></i> Area Subscriptions</span>
+                <span class="badge bg-primary">{{ subscribed_ids|length }} subscribed</span>
+            </div>
+            <div class="card-body p-0" style="max-height:360px; overflow-y:auto;">
+                {% if subscribed_ids %}
+                <table class="table table-striped table-sm mb-0">
+                    <thead><tr><th>Tag</th><th>Network</th><th>Actions</th></tr></thead>
+                    <tbody>
+                        {% for area in all_areas %}
+                        {% if area.id in subscribed_ids %}
+                        <tr>
+                            <td><code>{{ area.tag }}</code></td>
+                            <td>{{ area.network.name }}</td>
+                            <td>
+                                <form method="POST" action="{{ url_for('hub_admin.binkp_subscribe', node_id=node.id) }}" style="display:inline;">
+                                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                                    <input type="hidden" name="area_id" value="{{ area.id }}">
+                                    <input type="hidden" name="action" value="unsubscribe">
+                                    <button type="submit" class="btn btn-sm btn-outline-danger">−</button>
+                                </form>
+                                <form method="POST" action="{{ url_for('hub_admin.binkp_catchup', node_id=node.id) }}" style="display:inline;">
+                                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                                    <input type="hidden" name="area_id" value="{{ area.id }}">
+                                    <button type="submit" class="btn btn-sm btn-outline-warning" title="Queue all existing messages for catchup">Catchup</button>
+                                </form>
+                            </td>
+                        </tr>
+                        {% endif %}
+                        {% endfor %}
+                    </tbody>
+                </table>
+                {% else %}
+                <div class="text-center p-3 text-muted">No subscriptions yet — add areas below.</div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Add subscription -->
+<div class="card mb-4">
+    <div class="card-header d-flex justify-content-between align-items-center">
+        <span>Add Area Subscription</span>
+        <details class="d-inline-block">
+            <summary class="btn btn-sm btn-outline-primary" style="list-style:none; cursor:pointer;">
+                <i class="bi bi-check2-all"></i> Subscribe to All
+            </summary>
+            <form method="POST" action="{{ url_for('hub_admin.binkp_subscribe_all', node_id=node.id) }}"
+                  class="p-2 mt-1 rounded" style="background:rgba(0,0,0,0.2); position:absolute; z-index:10; right:0;">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <div class="mb-2" style="font-size:0.85rem;">Pick which BinkP network(s):</div>
+                {% for net in binkp_networks %}
+                <div class="form-check">
+                    <input class="form-check-input" type="checkbox" name="network_ids"
+                           value="{{ net.id }}" id="binkpsuball_net_{{ net.id }}">
+                    <label class="form-check-label" for="binkpsuball_net_{{ net.id }}" style="font-size:0.85rem;">{{ net.name }}</label>
+                </div>
+                {% endfor %}
+                <button type="submit" class="btn btn-sm btn-primary mt-2">Subscribe to Selected</button>
+            </form>
+        </details>
+    </div>
+    <div class="card-body">
+        <form method="POST" action="{{ url_for('hub_admin.binkp_subscribe', node_id=node.id) }}" class="row g-2 align-items-end">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="action" value="subscribe">
+            <div class="col-md-8">
+                <label class="form-label">Echo Area</label>
+                <select name="area_id" class="form-select">
+                    <option value="">— choose area —</option>
+                    {% for area in all_areas %}
+                    {% if area.id not in subscribed_ids %}
+                    <option value="{{ area.id }}">{{ area.tag }} ({{ area.network.name }})</option>
+                    {% endif %}
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-auto">
+                <button type="submit" class="btn btn-primary">Subscribe</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- File area subscriptions -->
+<div class="card mb-4">
+    <div class="card-header d-flex justify-content-between align-items-center">
+        <span><i class="bi bi-folder2-open"></i> File Area Subscriptions</span>
+        <span class="badge bg-primary">{{ file_subscribed_ids|length }} subscribed</span>
+    </div>
+    <div class="card-body p-0" style="max-height:360px; overflow-y:auto;">
+        {% if file_subscribed_ids %}
+        <table class="table table-striped table-sm mb-0">
+            <thead><tr><th>Tag</th><th>Name</th><th>Actions</th></tr></thead>
+            <tbody>
+                {% for area in all_file_areas %}
+                {% if area.id in file_subscribed_ids %}
+                <tr>
+                    <td><code>{{ area.tag }}</code></td>
+                    <td>{{ area.name or '' }}</td>
+                    <td>
+                        <form method="POST" action="{{ url_for('hub_admin.binkp_file_subscribe', node_id=node.id) }}" style="display:inline;">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                            <input type="hidden" name="area_id" value="{{ area.id }}">
+                            <input type="hidden" name="action" value="unsubscribe">
+                            <button type="submit" class="btn btn-sm btn-outline-danger">−</button>
+                        </form>
+                    </td>
+                </tr>
+                {% endif %}
+                {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <div class="text-center p-3 text-muted">No file-area subscriptions yet — add one below.</div>
+        {% endif %}
+    </div>
+    <div class="card-footer">
+        <a href="{{ url_for('admin.file_echo_subs', peer_address=node.ftn_address) }}" class="small">
+            View/manage all subscriptions for this node in File-Echo Subscriptions →</a>
+    </div>
+</div>
+
+<div class="card mb-4">
+    <div class="card-header d-flex justify-content-between align-items-center">
+        <span>Add File Area Subscription</span>
+        <form method="POST" action="{{ url_for('hub_admin.binkp_file_subscribe_all', node_id=node.id) }}"
+              onsubmit="return confirm('Subscribe {{ node.ftn_address }} to every active file area?');">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button type="submit" class="btn btn-sm btn-outline-primary">
+                <i class="bi bi-check2-all"></i> Subscribe to All
+            </button>
+        </form>
+    </div>
+    <div class="card-body">
+        <form method="POST" action="{{ url_for('hub_admin.binkp_file_subscribe', node_id=node.id) }}" class="row g-2 align-items-end">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="action" value="subscribe">
+            <div class="col-md-8">
+                <label class="form-label">File Area</label>
+                <select name="area_id" class="form-select">
+                    <option value="">— choose area —</option>
+                    {% for area in all_file_areas %}
+                    {% if area.id not in file_subscribed_ids %}
+                    <option value="{{ area.id }}">{{ area.tag }}{% if area.name %} ({{ area.name }}){% endif %}</option>
+                    {% endif %}
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-auto">
+                <button type="submit" class="btn btn-primary">Subscribe</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- Hold queue controls -->
+{% if pending_count %}
+<div class="card mb-4 border-warning">
+    <div class="card-header text-warning"><i class="bi bi-clock-history"></i> Pending Hold Queue ({{ pending_count }} messages)</div>
+    <div class="card-body">
+        <p>These messages will be sent to {{ node.ftn_address }} on their next BinkP connection.</p>
+        <form method="POST" action="{{ url_for('hub_admin.binkp_flush_queue', node_id=node.id) }}"
+              onsubmit="return confirm('Flush the pending hold queue for {{ node.ftn_address }}? Messages will not be sent.');">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button type="submit" class="btn btn-warning btn-sm">Flush Queue</button>
+        </form>
+    </div>
+</div>
+{% endif %}
+
+<!-- Recent hold queue entries -->
+{% if hold_entries %}
+<div class="card">
+    <div class="card-header"><i class="bi bi-journal-text"></i> Recent Hold Queue Activity</div>
+    <div class="card-body p-0">
+        <table class="table table-striped table-sm mb-0">
+            <thead><tr><th>Message ID</th><th>Area</th><th>Status</th><th>Queued</th><th>Sent</th></tr></thead>
+            <tbody>
+                {% for entry in hold_entries %}
+                <tr>
+                    <td>{{ entry.message_id }}</td>
+                    <td>{% if entry.message %}<code>{{ entry.message.area.tag if entry.message.area else '?' }}</code>{% endif %}</td>
+                    <td>
+                        {% if entry.status == 'sent' %}<span class="badge bg-success">sent</span>
+                        {% elif entry.status == 'pending' %}<span class="badge bg-warning text-dark">pending</span>
+                        {% else %}<span class="badge bg-danger">{{ entry.status }}</span>{% endif %}
+                    </td>
+                    <td style="font-size:0.8rem;">{{ entry.queued_at|eastern('%m-%d %H:%M') }}</td>
+                    <td style="font-size:0.8rem;">
+                        {% if entry.sent_at %}{{ entry.sent_at|eastern('%m-%d %H:%M') }}{% else %}—{% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endif %}
+{% endblock %}

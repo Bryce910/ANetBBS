@@ -1,0 +1,252 @@
+{% extends "base.html" %}
+{% block title %}{% if network %}Edit{% else %}Add{% endif %} Network — {{ config.BBS_NAME }}{% endblock %}
+
+{% block extra_css %}
+<style>
+.binkp-fields, .qwk-fields { display: none; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="bbs-header">
+    <h1><i class="bi bi-diagram-3"></i> {% if network %}Edit Network: {{ network.name }}{% else %}Add Network{% endif %}</h1>
+</div>
+
+<a href="{{ url_for('echomail_admin.networks') }}" class="btn btn-primary btn-sm mb-3">
+    <i class="bi bi-arrow-left"></i> Back to Networks
+</a>
+
+<div class="card">
+    <div class="card-header"><i class="bi bi-gear"></i> Network Configuration</div>
+    <div class="card-body">
+        <form method="post">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            {{ form.hidden_tag() }}
+
+            <div class="row g-3 mb-3">
+                <div class="col-md-6">
+                    {{ form.name.label(class="form-label") }}
+                    {{ form.name(class="form-control") }}
+                    {% for e in form.name.errors %}<div class="text-danger small">{{ e }}</div>{% endfor %}
+                </div>
+                <div class="col-md-3">
+                    {{ form.network_type.label(class="form-label") }}
+                    {{ form.network_type(class="form-control", id="network_type") }}
+                </div>
+                <div class="col-md-3">
+                    {{ form.poll_interval_minutes.label(class="form-label") }}
+                    {{ form.poll_interval_minutes(class="form-control") }}
+                </div>
+            </div>
+
+            <div class="mb-3">
+                {{ form.description.label(class="form-label") }}
+                {{ form.description(class="form-control", rows=2) }}
+            </div>
+
+            <div class="mb-3 form-check">
+                {{ form.is_active(class="form-check-input") }}
+                <label class="form-check-label" for="is_active" style="color:#00ff00;">Active</label>
+            </div>
+
+            <div class="mb-3 form-check">
+                {{ form.require_real_name_netmail(class="form-check-input") }}
+                <label class="form-check-label" for="require_real_name_netmail" style="color:#ffcc00;">
+                    Require real name for netmail
+                </label>
+                <div class="form-text" style="font-size:.7rem;">{{ form.require_real_name_netmail.description }}</div>
+            </div>
+
+            <!-- BinkP fields -->
+            <div id="binkp-fields" class="card mb-3" style="border-color:#006600;">
+                <div class="card-header" style="background:#001100; border-color:#006600;">
+                    <i class="bi bi-hdd-network"></i> BinkP (FidoNet) Settings
+                </div>
+                <div class="card-body">
+                    <div class="row g-3">
+                        <div class="col-md-8">
+                            {{ form.binkp_host.label(class="form-label") }}
+                            {{ form.binkp_host(class="form-control", placeholder="binkp.example.com") }}
+                        </div>
+                        <div class="col-md-4">
+                            {{ form.binkp_port.label(class="form-label") }}
+                            {{ form.binkp_port(class="form-control") }}
+                        </div>
+                    </div>
+                    <div class="row g-3 mt-1">
+                        <div class="col-md-4">
+                            {{ form.our_address.label(class="form-label") }}
+                            {{ form.our_address(class="form-control", placeholder="1:234/567") }}
+                        </div>
+                        <div class="col-md-4">
+                            {{ form.hub_address.label(class="form-label") }}
+                            {{ form.hub_address(class="form-control", placeholder="1:234/0") }}
+                        </div>
+                        <div class="col-md-4">
+                            {{ form.binkp_password.label(class="form-label") }}
+                            {{ form.binkp_password(class="form-control",
+                                placeholder="(leave blank to keep current)") }}
+                        </div>
+                    </div>
+                    <div class="row g-3 mt-1">
+                        <div class="col-md-4">
+                            {{ form.ftn_domain.label(class="form-label") }}
+                            {{ form.ftn_domain(class="form-control", placeholder="e.g. anet") }}
+                            {% for e in form.ftn_domain.errors %}<div class="text-danger small">{{ e }}</div>{% endfor %}
+                            <div class="form-text">
+                                Optional. Without this, the qualified BinkP
+                                address (addr@domain) derives its domain from
+                                the network name above, truncated to 8 chars
+                                — can look awkward for a long name.
+                            </div>
+                        </div>
+                    </div>
+                    <div class="row g-3 mt-1">
+                        <div class="col-md-6">
+                            {{ form.areafix_password.label(class="form-label") }}
+                            {{ form.areafix_password(class="form-control",
+                                placeholder="(leave blank to reuse BinkP password)") }}
+                            <div class="form-text">
+                                Many hubs use a separate password for AreaFix
+                                requests. Set this if the hub's AreaFix bot
+                                rejects you with "Invalid password" while
+                                BinkP itself authenticates fine.
+                            </div>
+                        </div>
+                    </div>
+                    <div class="row g-3 mt-1">
+                        <div class="col-md-6">
+                            {{ form.packet_password.label(class="form-label") }}
+                            {{ form.packet_password(class="form-control",
+                                placeholder="(leave blank to keep current / no packet password)") }}
+                            <div class="form-text">
+                                FTS-0001 packet-header password, separate from
+                                the BinkP session password above. Only needed
+                                if this hub's tosser checks it independently.
+                            </div>
+                        </div>
+                    </div>
+                    <div class="row g-3 mt-1">
+                        <div class="col-12"><label class="form-label mb-0">Outbound Netmail Flavor Defaults</label>
+                            <div class="form-text mt-0 mb-1">
+                                Applied to every outbound netmail routed through
+                                this network. Independently selectable — pick
+                                any combination.
+                            </div>
+                        </div>
+                        <div class="col-md-4 form-check">
+                            {{ form.default_crash(class="form-check-input") }}
+                            {{ form.default_crash.label(class="form-check-label ms-1") }}
+                        </div>
+                        <div class="col-md-4 form-check">
+                            {{ form.default_hold(class="form-check-input") }}
+                            {{ form.default_hold.label(class="form-check-label ms-1") }}
+                        </div>
+                        <div class="col-md-4 form-check">
+                            {{ form.default_direct(class="form-check-input") }}
+                            {{ form.default_direct.label(class="form-check-label ms-1") }}
+                        </div>
+                    </div>
+                    <div class="row g-3 mt-1">
+                        <div class="col-md-6">
+                            {{ form.default_recipient.label(class="form-label") }}
+                            {{ form.default_recipient(class="form-control",
+                                placeholder="e.g. SYSOP — for unaddressed netmail") }}
+                        </div>
+                        <div class="col-md-3 form-check d-flex align-items-end">
+                            <div>
+                                {{ form.cram_md5(class="form-check-input") }}
+                                {{ form.cram_md5.label(class="form-check-label ms-1") }}
+                            </div>
+                        </div>
+                        <div class="col-md-3 form-check d-flex align-items-end">
+                            <div>
+                                {{ form.binkp_tls(class="form-check-input") }}
+                                {{ form.binkp_tls.label(class="form-check-label ms-1") }}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- QWK fields -->
+            <div id="qwk-fields" class="card mb-3" style="border-color:#006600;">
+                <div class="card-header" style="background:#001100; border-color:#006600;">
+                    <i class="bi bi-envelope-paper"></i> QWK (Dove-Net) Settings
+                </div>
+                <div class="card-body">
+                    <div class="alert alert-info py-2 small mb-3">
+                        <strong>Two IDs, two different purposes:</strong>
+                        <ul class="mb-0 mt-1">
+                            <li><strong>Hub System ID</strong> = the hub's own ID (e.g. <code>VERT</code> for vert.synchro.net). Controls the download filename (<code>VERT.qwk</code>), upload filename (<code>VERT.rep</code>), and inner MSG file (<code>VERT.MSG</code>). The hub rejects the REP silently if this is wrong.</li>
+                            <li><strong>Packet ID</strong> = YOUR BBS's registered node ID on the hub (e.g. <code>ANETBBS</code>). Used for FTP login identity and message IDs. Does NOT go in the filenames.</li>
+                        </ul>
+                    </div>
+                    <div class="row g-3">
+                        <div class="col-md-5">
+                            {{ form.qwk_host.label(class="form-label") }}
+                            {{ form.qwk_host(class="form-control", placeholder="dove.synchro.net") }}
+                        </div>
+                        <div class="col-md-2">
+                            {{ form.qwk_port.label(class="form-label") }}
+                            {{ form.qwk_port(class="form-control") }}
+                        </div>
+                        <div class="col-md-2">
+                            {{ form.qwk_hub_id.label(class="form-label") }}
+                            {{ form.qwk_hub_id(class="form-control", placeholder="VERT") }}
+                            <div class="form-text">Hub's ID — e.g. <code>VERT</code></div>
+                        </div>
+                        <div class="col-md-3">
+                            {{ form.qwk_packet_id.label(class="form-label") }}
+                            {{ form.qwk_packet_id(class="form-control", placeholder="MYBBS") }}
+                            <div class="form-text">Your node ID — e.g. <code>ANETBBS</code></div>
+                        </div>
+                    </div>
+                    <div class="row g-3 mt-1">
+                        <div class="col-md-6">
+                            {{ form.qwk_username.label(class="form-label") }}
+                            {{ form.qwk_username(class="form-control") }}
+                            <div class="form-text">FTP login username assigned by the hub</div>
+                        </div>
+                        <div class="col-md-6">
+                            {{ form.qwk_password.label(class="form-label") }}
+                            {{ form.qwk_password(class="form-control", autocomplete="new-password") }}
+                        </div>
+                    </div>
+                    <div class="row g-3 mt-1">
+                        <div class="col-md-6">
+                            {{ form.qwk_download_url.label(class="form-label") }}
+                            {{ form.qwk_download_url(class="form-control", placeholder="Leave blank for Dove-Net auto-default") }}
+                            <div class="form-text">Leave blank — auto: <code>ftp://dove.synchro.net/{hub_id}.qwk</code></div>
+                        </div>
+                        <div class="col-md-6">
+                            {{ form.qwk_upload_url.label(class="form-label") }}
+                            {{ form.qwk_upload_url(class="form-control", placeholder="Leave blank for Dove-Net auto-default") }}
+                            <div class="form-text">Leave blank — auto: <code>ftp://dove.synchro.net/{hub_id}.rep</code></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="d-flex justify-content-between">
+                <a href="{{ url_for('echomail_admin.networks') }}" class="btn btn-primary">
+                    <i class="bi bi-x-circle"></i> Cancel
+                </a>
+                {{ form.submit(class="btn btn-primary") }}
+            </div>
+        </form>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+function updateFields() {
+    var type = document.getElementById('network_type').value;
+    document.getElementById('binkp-fields').style.display = (type === 'binkp') ? 'block' : 'none';
+    document.getElementById('qwk-fields').style.display   = (type === 'qwk')   ? 'block' : 'none';
+}
+document.getElementById('network_type').addEventListener('change', updateFields);
+updateFields();
+</script>
+{% endblock %}

@@ -1,0 +1,2362 @@
+#!/usr/bin/env bash
+# ═══════════════════════════════════════════════════════════════════════════════
+# ANetBBS — All-in-One Install Wizard
+# https://github.com/anetonline/anetbbs
+#
+# Usage:
+#   sudo bash install.sh              # Interactive install
+#   sudo bash install.sh --uninstall  # Remove ANetBBS
+#   sudo bash install.sh --defaults   # Install with all defaults (non-interactive)
+#   sudo bash install.sh --force      # Overwrite existing .env and database
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ─── Color helpers ─────────────────────────────────────────────────────────────
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'
+BOLD='\033[1m'; DIM='\033[2m'; NC='\033[0m'
+
+info()  { echo -e "${GREEN}[INFO]${NC}  $*"; }
+warn()  { echo -e "${YELLOW}[WARN]${NC}  $*"; }
+fail()  { echo -e "${RED}[FAIL]${NC}  $*"; }
+step()  { echo -e "\n${CYAN}${BOLD}── $* ──${NC}"; }
+ok()    { echo -e "  ${GREEN}✅ $*${NC}"; }
+skip()  { echo -e "  ${YELLOW}⏭  $*${NC}"; }
+bad()   { echo -e "  ${RED}❌ $*${NC}"; }
+
+# Track what succeeded for final summary
+declare -A STATUS
+
+# ─── Defaults ──────────────────────────────────────────────────────────────────
+DEF_BBS_NAME="ANetBBS"
+DEF_BBS_DESC="A Modern BBS System"
+DEF_SERVICE_USER="anetbbs"
+DEF_INSTALL_DIR="/opt/anetbbs"
+DEF_ADMIN_USER="admin"
+DEF_DOMAIN="localhost"
+DEF_WEB_PORT=5000
+DEF_TELNET_PORT=2233
+DEF_SSH_PORT=2234
+DEF_ENABLE_TELNET="y"
+DEF_ENABLE_SSH="y"
+DEF_ENABLE_NGINX="y"
+DEF_ENABLE_SSL="n"
+
+# ─── Source directory (where install.sh lives) ─────────────────────────────────
+SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Real gap found in a pre-release audit: this used to be a separately
+# hardcoded BBS_VERSION="1.3.7" here (and in update.sh) that never
+# tracked the actual ANetBBS release at all -- drifted from day one,
+# three different disconnected values existed across install.sh/
+# update.sh/mrc/bridge/config.example.json by the time this was found.
+# Read the real version the same way update.sh already does for its
+# own OLD_VERSION/NEW_VERSION comparison.
+BBS_VERSION="$(cat "$SOURCE_DIR/VERSION" 2>/dev/null || echo unknown)"
+
+# Real bug found live testing a fresh install: that same audit went on
+# to plug BBS_VERSION into the MRC bridge's platform_info field
+# (below), on the assumption that the old "1.3.7" was just a stale,
+# meaningless leftover. It wasn't -- platform_info's version component
+# identifies MRC *client/protocol* compatibility to the upstream hub
+# (mrc.bottomlessabyss.net), a completely separate numbering scheme
+# from ANetBBS's own release version, and the hub actively rejects
+# connections below whatever minimum it currently enforces
+# ("OLDVERSION" packet, handled in mrc/bridge/main.py). ANetBBS is at
+# v1.0.x; the hub's real live minimum observed testing this was 1.2.9
+# -- meaning EVERY fresh install advertising ANetBBS's own version
+# here was guaranteed to be rejected by the hub, regardless of how
+# current the actual ANetBBS release was, since the two numbering
+# schemes have nothing to do with each other. This is independent of
+# BBS_VERSION on purpose -- do not derive it from the VERSION file
+# again. Matches the reference client's own real version
+# (anetmrc_v1.3.9, cross-referenced throughout mrc/bridge/main.py's
+# protocol audit comments), safely above the hub's current floor.
+MRC_CLIENT_COMPAT_VERSION="1.3.9"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# UNINSTALL
+# ═══════════════════════════════════════════════════════════════════════════════
+if [[ "${1:-}" == "--uninstall" ]]; then
+    echo -e "${BOLD}${RED}"
+    echo "╔══════════════════════════════════════════════╗"
+    echo "║         ANetBBS — UNINSTALL                  ║"
+    echo "╚══════════════════════════════════════════════╝"
+    echo -e "${NC}"
+
+    read -rp "Service user [anetbbs]: " UNI_USER
+    UNI_USER="${UNI_USER:-anetbbs}"
+    read -rp "Install directory [/opt/anetbbs]: " UNI_DIR
+    UNI_DIR="${UNI_DIR:-/opt/anetbbs}"
+
+    read -rp "Are you sure you want to completely remove ANetBBS? [y/N]: " CONFIRM
+    [[ "${CONFIRM,,}" != "y" ]] && { echo "Aborted."; exit 0; }
+
+    info "Stopping and removing services..."
+    for svc in anetbbs-web anetbbs anetbbs-telnet anetbbs-ssh anetbbs-mrc-bridge anetbbs-finger anetbbs-binkp; do
+        systemctl stop    "$svc" 2>/dev/null || true
+        systemctl disable "$svc" 2>/dev/null || true
+        rm -f "/etc/systemd/system/${svc}.service"
+    done
+    systemctl daemon-reload
+
+    info "Removing nginx config..."
+    rm -f /etc/nginx/sites-enabled/anetbbs
+    rm -f /etc/nginx/sites-available/anetbbs
+    systemctl reload nginx 2>/dev/null || true
+
+    info "Removing install directory..."
+    rm -rf "$UNI_DIR"
+
+    info "Removing system user..."
+    id "$UNI_USER" &>/dev/null && userdel "$UNI_USER" 2>/dev/null || true
+
+    info "ANetBBS has been uninstalled."
+    exit 0
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ROOT CHECK
+# ═══════════════════════════════════════════════════════════════════════════════
+if [[ "$EUID" -ne 0 ]]; then
+    fail "This installer must be run as root."
+    echo "  Run: sudo bash install.sh"
+    exit 1
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SYSTEMD CHECK
+# ═══════════════════════════════════════════════════════════════════════════════
+# This installer manages ANetBBS entirely as systemd units (Step 8 below).
+# Without systemctl, every service-install/enable/start call would just fail
+# with "command not found", scattered across 9 steps with no clear signal
+# of the real cause. Fail fast with one clear message instead.
+if ! command -v systemctl >/dev/null 2>&1; then
+    fail "systemctl not found — ANetBBS's install/update scripts require systemd."
+    echo "  This system (or container) doesn't appear to run systemd."
+    echo "  See docker/ for a container-based deployment that doesn't need it."
+    exit 1
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# OS DETECTION
+# ═══════════════════════════════════════════════════════════════════════════════
+step "Detecting operating system"
+
+OS_ID="unknown"
+OS_VERSION=""
+OS_PRETTY=""
+PKG_MANAGER="unknown"
+
+if [[ -f /etc/os-release ]]; then
+    . /etc/os-release
+    OS_ID="${ID,,}"
+    OS_VERSION="${VERSION_ID:-}"
+    OS_PRETTY="${PRETTY_NAME:-$OS_ID $OS_VERSION}"
+fi
+
+case "$OS_ID" in
+    ubuntu|debian|linuxmint|pop|elementary|zorin|kali)
+        PKG_MANAGER="apt"
+        ;;
+    rhel|centos|rocky|almalinux|ol)
+        if command -v dnf &>/dev/null; then
+            PKG_MANAGER="dnf"
+        elif command -v yum &>/dev/null; then
+            PKG_MANAGER="yum"
+        fi
+        ;;
+    fedora)
+        PKG_MANAGER="dnf"
+        ;;
+    arch|manjaro|endeavouros)
+        PKG_MANAGER="pacman"
+        ;;
+    opensuse*|sles)
+        PKG_MANAGER="zypper"
+        ;;
+    *)
+        PKG_MANAGER="unknown"
+        ;;
+esac
+
+info "Detected: ${BOLD}$OS_PRETTY${NC}"
+info "Package manager: ${BOLD}$PKG_MANAGER${NC}"
+
+if [[ "$PKG_MANAGER" == "unknown" ]]; then
+    warn "Could not detect your package manager."
+    warn "You may need to install dependencies manually."
+    read -rp "Continue anyway? [y/N]: " CONT
+    [[ "${CONT,,}" != "y" ]] && { echo "Aborted."; exit 1; }
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PYTHON VERSION CHECK
+# ═══════════════════════════════════════════════════════════════════════════════
+PYTHON_CMD=""
+for cmd in python3.12 python3.11 python3.10 python3; do
+    if command -v "$cmd" &>/dev/null; then
+        PY_VER=$("$cmd" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null)
+        PY_MAJOR=$(echo "$PY_VER" | cut -d. -f1)
+        PY_MINOR=$(echo "$PY_VER" | cut -d. -f2)
+        if [[ "$PY_MAJOR" -ge 3 ]] && [[ "$PY_MINOR" -ge 9 ]]; then
+            PYTHON_CMD="$cmd"
+            break
+        fi
+    fi
+done
+
+if [[ -n "$PYTHON_CMD" ]]; then
+    info "Found Python: ${BOLD}$PYTHON_CMD ($PY_VER)${NC}"
+else
+    info "Python 3.9+ not yet installed — will install during setup."
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# INTERACTIVE WIZARD
+# ═══════════════════════════════════════════════════════════════════════════════
+USE_DEFAULTS=false
+FORCE_OVERWRITE=false
+[[ "${1:-}" == "--defaults" ]] && USE_DEFAULTS=true
+[[ "${1:-}" == "--force" || "${2:-}" == "--force" ]] && FORCE_OVERWRITE=true
+
+echo ""
+echo -e "${BOLD}${CYAN}"
+echo "╔══════════════════════════════════════════════════════════════╗"
+echo "║                                                              ║"
+echo "║              █████╗ ███╗   ██╗███████╗████████╗              ║"
+echo "║             ██╔══██╗████╗  ██║██╔════╝╚══██╔══╝              ║"
+echo "║             ███████║██╔██╗ ██║█████╗     ██║                 ║"
+echo "║             ██╔══██║██║╚██╗██║██╔══╝     ██║                 ║"
+echo "║             ██║  ██║██║ ╚████║███████╗   ██║                 ║"
+echo "║             ╚═╝  ╚═╝╚═╝  ╚═══╝╚══════╝   ╚═╝                 ║"
+echo "║                                                              ║"
+echo "║              ANetBBS — Installation Wizard                   ║"
+echo "║                                                              ║"
+echo "╚══════════════════════════════════════════════════════════════╝"
+echo -e "${NC}"
+echo -e "${DIM}  This wizard will set up your BBS from scratch.${NC}"
+echo -e "${DIM}  Press Enter to accept [defaults] shown in brackets.${NC}"
+echo ""
+
+ask() {
+    local var_name="$1" prompt="$2" default="$3"
+    if $USE_DEFAULTS; then
+        eval "$var_name=\"$default\""
+    else
+        read -rp "  $prompt [$default]: " input
+        eval "$var_name=\"\${input:-$default}\""
+    fi
+}
+
+ask_yn() {
+    local var_name="$1" prompt="$2" default="$3"
+    if $USE_DEFAULTS; then
+        eval "$var_name=\"$default\""
+    else
+        read -rp "  $prompt [$default]: " input
+        input="${input:-$default}"
+        eval "$var_name=\"\${input,,}\""
+    fi
+}
+
+ask_secret() {
+    local var_name="$1" prompt="$2"
+    if $USE_DEFAULTS; then
+        eval "$var_name=\"\""
+        return
+    fi
+    local input confirm
+    while true; do
+        echo -en "  $prompt (leave blank to auto-generate): "
+        read -rs input
+        echo ""
+        if [[ -z "$input" ]]; then
+            # Blank = auto-generate, no confirmation needed.
+            eval "$var_name=\"\""
+            return
+        fi
+        echo -en "  Confirm password: "
+        read -rs confirm
+        echo ""
+        if [[ "$input" == "$confirm" ]]; then
+            eval "$var_name=\"$input\""
+            return
+        fi
+        warn "Passwords didn't match. Try again."
+    done
+}
+
+echo -e "${BOLD}  ── Install Mode ──${NC}"
+echo "  production  = Full public BBS with HTTPS. We install nginx + a"
+echo "                Let's Encrypt cert on YOUR domain. Needs ports"
+echo "                80/443 reachable from the internet. Pick this if"
+echo "                ANetBBS is the only web server on this box."
+echo ""
+echo "  behind      = You already run another BBS / web server that owns"
+echo "                ports 80/443 (Synchronet, Mystic, etc.). ANetBBS"
+echo "                gunicorn binds 0.0.0.0:8080 — reverse-proxy to it"
+echo "                from your existing nginx/apache. We don't touch"
+echo "                your web-server config."
+echo ""
+echo "  test        = Local sandbox. gunicorn binds 127.0.0.1:8080 — only"
+echo "                reachable from this box itself (or via SSH tunnel)."
+echo "                No port exposed to the LAN, no public web at all."
+echo "                Telnet/SSH/MRC still work normally for trying"
+echo "                ANetBBS out."
+echo ""
+ask INSTALL_MODE    "Install mode (production/behind/test)" "production"
+INSTALL_MODE="${INSTALL_MODE,,}"
+if [[ "$INSTALL_MODE" != "production" && "$INSTALL_MODE" != "behind" && "$INSTALL_MODE" != "test" ]]; then
+    warn "Unrecognized mode '$INSTALL_MODE' — defaulting to production"
+    INSTALL_MODE="production"
+fi
+# Apply mode-derived defaults to the prompts below. Sysop can still
+# override anything explicitly later in the wizard.
+case "$INSTALL_MODE" in
+    test)
+        DEF_DOMAIN="localhost"
+        DEF_ENABLE_NGINX="n"
+        DEF_ENABLE_SSL="n"
+        DEF_ENABLE_MSP="n"
+        DEF_ENABLE_FINGER="n"
+        DEF_ENABLE_BINKP="n"
+        DEF_WEB_PORT=8080
+        WEB_BIND="127.0.0.1"   # localhost-only, invisible to LAN
+        ;;
+    behind)
+        DEF_DOMAIN="localhost"
+        DEF_ENABLE_NGINX="n"
+        DEF_ENABLE_SSL="n"
+        # Privileged-port services + BinkP can still run alongside the
+        # other BBS as long as ports aren't already taken; sysop opts in.
+        DEF_ENABLE_MSP="n"
+        DEF_ENABLE_FINGER="n"
+        DEF_ENABLE_BINKP="y"
+        DEF_WEB_PORT=8080
+        WEB_BIND="0.0.0.0"     # reachable so sysop's other nginx can proxy in
+        ;;
+    *)
+        DEF_ENABLE_NGINX="y"
+        DEF_ENABLE_SSL="y"
+        DEF_ENABLE_MSP="y"
+        DEF_ENABLE_FINGER="y"
+        DEF_ENABLE_BINKP="y"
+        DEF_WEB_PORT=5000
+        WEB_BIND="0.0.0.0"
+        ;;
+esac
+echo ""
+
+echo -e "${BOLD}  ── BBS Settings ──${NC}"
+ask BBS_NAME        "BBS Name"              "$DEF_BBS_NAME"
+ask BBS_DESC        "BBS Description"       "$DEF_BBS_DESC"
+echo ""
+
+echo -e "${BOLD}  ── System Settings ──${NC}"
+ask SERVICE_USER    "System service user"    "$DEF_SERVICE_USER"
+ask INSTALL_DIR     "Install directory"      "$DEF_INSTALL_DIR"
+echo ""
+
+echo -e "${BOLD}  ── Sysop Admin Account ──${NC}"
+ask SYSOP_NAME      "Sysop username (your handle / login)"   "$BBS_NAME Sysop"
+ADMIN_USER="$SYSOP_NAME"
+ask_secret ADMIN_PASS "Sysop password"
+
+# Auto-generate password if blank
+if [[ -z "$ADMIN_PASS" ]]; then
+    ADMIN_PASS=$(openssl rand -base64 16 2>/dev/null || python3 -c "import secrets; print(secrets.token_urlsafe(16))" 2>/dev/null || head -c 24 /dev/urandom | base64 | tr -d '/+=' | head -c 16)
+    ADMIN_PASS_GENERATED=true
+    info "  Auto-generated admin password."
+else
+    ADMIN_PASS_GENERATED=false
+fi
+
+echo ""
+echo -e "${BOLD}  ── Network Settings ──${NC}"
+ask DOMAIN          "Domain / hostname"      "$DEF_DOMAIN"
+ask WEB_PORT        "Web port"               "$DEF_WEB_PORT"
+ask TELNET_PORT     "Telnet port"            "$DEF_TELNET_PORT"
+ask SSH_PORT        "SSH port"               "$DEF_SSH_PORT"
+echo ""
+
+# MRC bridge default port is derived from WEB_PORT+1, not a fixed 8080 --
+# test/behind modes default WEB_PORT itself to 8080, so a fixed MRC
+# default would collide with gunicorn (both trying to bind the same
+# port) whenever the sysop leaves both at their defaults. Computed here
+# (unconditionally, right after WEB_PORT is finalized) rather than
+# inside the .env-generation block below, since that block is skipped
+# entirely on a re-run where .env already exists but the MRC config.json
+# generation further down still runs independently.
+MRC_BRIDGE_PORT_DEFAULT=$((WEB_PORT + 1))
+
+echo -e "${BOLD}  ── Services to Enable ──${NC}"
+ask_yn ENABLE_TELNET "Enable Telnet server? (y/n)"   "$DEF_ENABLE_TELNET"
+ask_yn ENABLE_SSH    "Enable SSH server? (y/n)"       "$DEF_ENABLE_SSH"
+ask_yn ENABLE_NGINX  "Enable nginx reverse proxy? (y/n)" "$DEF_ENABLE_NGINX"
+ask_yn ENABLE_MRC    "Install MRC bridge service (inter-BBS chat)? (y/n)" "y"
+if [[ "$ENABLE_MRC" == "y" ]]; then
+    ask MRC_BACKEND "MRC connection backend: 'native' (ANetBBS's own bridge) or 'mystic' (runs the real vendored Mystic BBS multiplexer client as a subprocess instead)" "native"
+else
+    MRC_BACKEND="native"
+fi
+ask_yn ENABLE_MSP    "Enable inter-BBS Instant Messaging (MSP/SYSTAT, privileged ports 18/11)? (y/n)" "$DEF_ENABLE_MSP"
+ask_yn ENABLE_FINGER "Enable Finger service (RFC 1288, privileged port 79)? (y/n)" "$DEF_ENABLE_FINGER"
+ask_yn ENABLE_BINKP  "Enable BinkP listener for FidoNet inbound mail (port 24554)? (y/n)" "$DEF_ENABLE_BINKP"
+
+ENABLE_SSL="n"
+if [[ "$DOMAIN" != "localhost" ]] && [[ "$ENABLE_NGINX" == "y" ]]; then
+    ask_yn ENABLE_SSL "Enable SSL via Let's Encrypt? (y/n)" "$DEF_ENABLE_SSL"
+fi
+
+# In test or behind-another-server mode, refuse SSL even if user said
+# yes — there's no public domain to certify against (test), or the
+# certbot challenge would conflict with the sysop's existing web server
+# on port 80 (behind). Sysop can run certbot manually later if they
+# want HTTPS on the front-facing nginx instead.
+if [[ "$INSTALL_MODE" == "test" || "$INSTALL_MODE" == "behind" ]]; then
+    if [[ "$ENABLE_SSL" == "y" ]]; then
+        warn "$INSTALL_MODE mode: forcing ENABLE_SSL=n."
+        ENABLE_SSL="n"
+    fi
+fi
+
+echo ""
+echo -e "${BOLD}  ── Optional Components ──${NC}"
+ask_yn INSTALL_DOSBOX "Install DOSBox-staging for DOS door games? (y/n)"      "n"
+ask_yn INSTALL_DOSEMU "Install dosemu2 for door_dosemu game type (e.g. TW2002-style doors needing a real FOSSIL/COM1)? (y/n)" "n"
+ask_yn INSTALL_CLAMAV "Install ClamAV for upload virus scanning? (y/n)"        "n"
+ask_yn INSTALL_LHASA  "Install lhasa for .lzh archive description extraction? (y/n)" "n"
+ask_yn INSTALL_SIXEL  "Install chafa + libsixel-bin for terminal image viewing (RSS reader + Image Gallery)? (y/n)" "n"
+ask_yn INSTALL_MYSTIC "Install Mystic BBS runtime + mplc compiler (.mps door support)? (y/n)" "n"
+# UFW: only meaningful in production mode (test mode is local-only)
+if [[ "$INSTALL_MODE" == "production" ]]; then
+    ask_yn CONFIGURE_UFW  "Configure UFW firewall (open BBS ports)? (y/n)"     "n"
+else
+    CONFIGURE_UFW="n"
+fi
+
+# ─── Generate SECRET_KEY ───────────────────────────────────────────────────────
+SECRET_KEY=$(openssl rand -hex 32 2>/dev/null || python3 -c "import secrets; print(secrets.token_hex(32))" 2>/dev/null || head -c 64 /dev/urandom | xxd -p | tr -d '\n' | head -c 64)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CONFIRMATION
+# ═══════════════════════════════════════════════════════════════════════════════
+echo ""
+echo -e "${BOLD}${CYAN}┌──────────────────────────────────────────────────┐${NC}"
+echo -e "${BOLD}${CYAN}│         Installation Summary                     │${NC}"
+echo -e "${BOLD}${CYAN}└──────────────────────────────────────────────────┘${NC}"
+echo -e "  Mode:            ${BOLD}${INSTALL_MODE}${NC}"
+echo -e "  BBS Name:        ${BOLD}$BBS_NAME${NC}"
+echo -e "  Description:     ${BOLD}$BBS_DESC${NC}"
+echo -e "  System User:     ${BOLD}$SERVICE_USER${NC}"
+echo -e "  Install Dir:     ${BOLD}$INSTALL_DIR${NC}"
+echo -e "  Admin User:      ${BOLD}$ADMIN_USER${NC}"
+echo -e "  Admin Password:  ${BOLD}$(if $ADMIN_PASS_GENERATED; then echo "$ADMIN_PASS (auto-generated)"; else echo "********"; fi)${NC}"
+echo -e "  Domain:          ${BOLD}$DOMAIN${NC}"
+echo -e "  Web Port:        ${BOLD}$WEB_PORT${NC} (bind ${WEB_BIND})"
+echo -e "  Telnet:          ${BOLD}$([ "$ENABLE_TELNET" = "y" ] && echo "Enabled (port $TELNET_PORT)" || echo "Disabled")${NC}"
+echo -e "  SSH:             ${BOLD}$([ "$ENABLE_SSH" = "y" ] && echo "Enabled (port $SSH_PORT)" || echo "Disabled")${NC}"
+echo -e "  nginx:           ${BOLD}$([ "$ENABLE_NGINX" = "y" ] && echo "Enabled" || echo "Disabled")${NC}"
+echo -e "  SSL:             ${BOLD}$([ "$ENABLE_SSL" = "y" ] && echo "Enabled" || echo "Disabled")${NC}"
+echo -e "  Inter-BBS IM:    ${BOLD}$([ "$ENABLE_MSP" = "y" ] && echo "Enabled (MSP/18, SYSTAT/11)" || echo "Disabled")${NC}"
+echo -e "  Finger:          ${BOLD}$([ "$ENABLE_FINGER" = "y" ] && echo "Enabled (port 79)" || echo "Disabled")${NC}"
+echo -e "  BinkP:           ${BOLD}$([ "$ENABLE_BINKP" = "y" ] && echo "Enabled (port 24554)" || echo "Disabled")${NC}"
+echo -e "  Mystic .mps:     ${BOLD}$([ "$INSTALL_MYSTIC" = "y" ] && echo "Will download" || echo "Skipped")${NC}"
+echo -e "  OS:              ${BOLD}$OS_PRETTY${NC}"
+echo ""
+
+if ! $USE_DEFAULTS; then
+    read -rp "  Proceed with installation? [Y/n]: " GO
+    [[ "${GO,,}" == "n" ]] && { echo "Aborted."; exit 0; }
+fi
+
+echo ""
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PACKAGE INSTALLATION HELPERS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+heal_apt() {
+    info "Healing package manager state..."
+    dpkg --configure -a 2>/dev/null || true
+    apt-get --fix-broken install -y 2>/dev/null || true
+    apt-get update -qq 2>/dev/null || true
+}
+
+install_one_pkg() {
+    local pkg="$1"
+    case "$PKG_MANAGER" in
+        apt)
+            DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$pkg" 2>/dev/null
+            ;;
+        dnf)
+            dnf install -y -q "$pkg" 2>/dev/null
+            ;;
+        yum)
+            yum install -y -q "$pkg" 2>/dev/null
+            ;;
+        pacman)
+            pacman -S --noconfirm --needed "$pkg" 2>/dev/null
+            ;;
+        zypper)
+            zypper install -y -n "$pkg" 2>/dev/null
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+pkg_name() {
+    local generic="$1"
+    case "$PKG_MANAGER" in
+        apt)
+            case "$generic" in
+                python3)         echo "python3" ;;
+                python3-venv)    echo "python3-venv" ;;
+                python3-pip)     echo "python3-pip" ;;
+                python3-dev)     echo "python3-dev" ;;
+                build-essential) echo "build-essential" ;;
+                rsync)           echo "rsync" ;;
+                git)             echo "git" ;;
+                curl)            echo "curl" ;;
+                nodejs)          echo "nodejs" ;;
+                npm)             echo "npm" ;;
+                nginx)           echo "nginx" ;;
+                certbot)         echo "certbot" ;;
+                certbot-nginx)   echo "python3-certbot-nginx" ;;
+                dosbox)          echo "dosbox" ;;
+                openssh-client)  echo "openssh-client" ;;
+                libffi-dev)      echo "libffi-dev" ;;
+                libsixel-bin)    echo "libsixel-bin" ;;
+                *)               echo "$generic" ;;
+            esac
+            ;;
+        dnf|yum)
+            case "$generic" in
+                python3)         echo "python3" ;;
+                python3-venv)    echo "python3" ;;
+                python3-pip)     echo "python3-pip" ;;
+                python3-dev)     echo "python3-devel" ;;
+                build-essential) echo "gcc gcc-c++ make" ;;
+                rsync)           echo "rsync" ;;
+                git)             echo "git" ;;
+                curl)            echo "curl" ;;
+                nodejs)          echo "nodejs" ;;
+                npm)             echo "npm" ;;
+                nginx)           echo "nginx" ;;
+                certbot)         echo "certbot" ;;
+                certbot-nginx)   echo "python3-certbot-nginx" ;;
+                dosbox)          echo "dosbox" ;;
+                openssh-client)  echo "openssh-clients" ;;
+                libffi-dev)      echo "libffi-devel" ;;
+                libsixel-bin)    echo "libsixel" ;;
+                *)               echo "$generic" ;;
+            esac
+            ;;
+        pacman)
+            case "$generic" in
+                python3)         echo "python" ;;
+                python3-venv)    echo "python" ;;
+                python3-pip)     echo "python-pip" ;;
+                python3-dev)     echo "python" ;;
+                build-essential) echo "base-devel" ;;
+                rsync)           echo "rsync" ;;
+                git)             echo "git" ;;
+                curl)            echo "curl" ;;
+                nodejs)          echo "nodejs" ;;
+                npm)             echo "npm" ;;
+                nginx)           echo "nginx" ;;
+                certbot)         echo "certbot" ;;
+                certbot-nginx)   echo "certbot-nginx" ;;
+                dosbox)          echo "dosbox" ;;
+                openssh-client)  echo "openssh" ;;
+                libffi-dev)      echo "libffi" ;;
+                libsixel-bin)    echo "libsixel" ;;
+                *)               echo "$generic" ;;
+            esac
+            ;;
+        zypper)
+            # openSUSE/SLES. Previously fell through to the generic
+            # Debian-style names below (wrong on every entry that
+            # actually differs) -- these package names are best-effort,
+            # not verified against a real openSUSE box in this
+            # environment; report any mismatch upstream.
+            case "$generic" in
+                python3)         echo "python3" ;;
+                python3-venv)    echo "python3" ;;
+                python3-pip)     echo "python3-pip" ;;
+                python3-dev)     echo "python3-devel" ;;
+                build-essential) echo "gcc gcc-c++ make" ;;
+                rsync)           echo "rsync" ;;
+                git)             echo "git" ;;
+                curl)            echo "curl" ;;
+                nodejs)          echo "nodejs" ;;
+                npm)             echo "npm" ;;
+                nginx)           echo "nginx" ;;
+                certbot)         echo "certbot" ;;
+                certbot-nginx)   echo "python3-certbot-nginx" ;;
+                dosbox)          echo "dosbox" ;;
+                openssh-client)  echo "openssh" ;;
+                libffi-dev)      echo "libffi-devel" ;;
+                libsixel-bin)    echo "libsixel" ;;
+                *)               echo "$generic" ;;
+            esac
+            ;;
+        *)
+            echo "$generic"
+            ;;
+    esac
+}
+
+# Disk-space pre-flight check. update.sh gained this after a sysop's disk
+# hit zero mid-update and corrupted the install; a fresh install can fail
+# the exact same way (package installs + venv + rsynced source all write
+# real bytes before anything is recoverable). INSTALL_DIR itself may not
+# exist yet, so check its parent directory's filesystem instead.
+MIN_FREE_KB=512000  # 500MB
+_check_free_space() {
+    local path="$1" label="$2"
+    local avail_kb
+    avail_kb=$(df -Pk "$path" 2>/dev/null | tail -1 | awk '{print $4}')
+    if [[ -z "$avail_kb" ]]; then
+        warn "Could not determine free space on $label ($path) — proceeding without this check"
+        return 0
+    fi
+    if (( avail_kb < MIN_FREE_KB )); then
+        fail "Only $((avail_kb / 1024))MB free on $label ($path) — need at least $((MIN_FREE_KB / 1024))MB."
+        echo "  Free up space first, then re-run install.sh. Refusing to proceed:"
+        echo "  running out of space mid-install can leave a half-configured system."
+        exit 1
+    fi
+    ok "$label: $((avail_kb / 1024))MB free"
+}
+_INSTALL_PARENT="$INSTALL_DIR"
+while [[ ! -d "$_INSTALL_PARENT" && "$_INSTALL_PARENT" != "/" ]]; do
+    _INSTALL_PARENT=$(dirname "$_INSTALL_PARENT")
+done
+_check_free_space "$_INSTALL_PARENT" "install filesystem"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# STEP 1: HEAL & UPDATE PACKAGE MANAGER
+# ═══════════════════════════════════════════════════════════════════════════════
+step "Step 1/9: Preparing package manager"
+
+case "$PKG_MANAGER" in
+    apt)
+        heal_apt
+        info "Updating package lists..."
+        apt-get update -qq 2>/dev/null || warn "apt-get update had warnings (continuing)"
+        ok "APT ready"
+        ;;
+    dnf)
+        info "Refreshing dnf cache..."
+        dnf makecache -q 2>/dev/null || true
+        ok "DNF ready"
+        ;;
+    yum)
+        info "Refreshing yum cache..."
+        yum makecache -q 2>/dev/null || true
+        ok "YUM ready"
+        ;;
+    pacman)
+        info "Refreshing pacman databases..."
+        pacman -Sy --noconfirm 2>/dev/null || true
+        ok "Pacman ready"
+        ;;
+    zypper)
+        info "Refreshing zypper repositories..."
+        zypper --non-interactive refresh 2>/dev/null || true
+        ok "Zypper ready"
+        ;;
+    *)
+        warn "Unrecognized package manager ($PKG_MANAGER) — skipping cache refresh."
+        ;;
+esac
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# STEP 2: INSTALL REQUIRED PACKAGES
+# ═══════════════════════════════════════════════════════════════════════════════
+step "Step 2/9: Installing required system packages"
+
+REQUIRED_PKGS=(python3 python3-venv python3-pip python3-dev build-essential libffi-dev rsync git curl openssh-client lrzsz)
+REQUIRED_FAILED=()
+
+for generic in "${REQUIRED_PKGS[@]}"; do
+    actual=$(pkg_name "$generic")
+    for p in $actual; do
+        if install_one_pkg "$p"; then
+            ok "$p"
+        else
+            if [[ "$PKG_MANAGER" == "apt" ]]; then
+                heal_apt
+                if install_one_pkg "$p"; then
+                    ok "$p (installed after repair)"
+                else
+                    REQUIRED_FAILED+=("$p")
+                    bad "$p — FAILED"
+                fi
+            else
+                REQUIRED_FAILED+=("$p")
+                bad "$p — FAILED"
+            fi
+        fi
+    done
+done
+
+if [[ ${#REQUIRED_FAILED[@]} -gt 0 ]]; then
+    echo ""
+    fail "The following REQUIRED packages could not be installed:"
+    for p in "${REQUIRED_FAILED[@]}"; do
+        echo -e "    ${RED}• $p${NC}"
+    done
+    echo ""
+    fail "Please fix your system package manager and try again."
+    case "$PKG_MANAGER" in
+        apt)
+            echo -e "  On Ubuntu/Debian try:"
+            echo -e "    ${CYAN}sudo dpkg --configure -a${NC}"
+            echo -e "    ${CYAN}sudo apt --fix-broken install${NC}"
+            echo -e "    ${CYAN}sudo apt update${NC}"
+            ;;
+        dnf|yum)
+            echo -e "  On Fedora/RHEL try:"
+            echo -e "    ${CYAN}sudo $PKG_MANAGER clean all${NC}"
+            echo -e "    ${CYAN}sudo $PKG_MANAGER makecache${NC}"
+            ;;
+        pacman)
+            echo -e "  On Arch try:"
+            echo -e "    ${CYAN}sudo pacman -Syyu${NC}"
+            ;;
+        zypper)
+            echo -e "  On openSUSE try:"
+            echo -e "    ${CYAN}sudo zypper refresh${NC}"
+            echo -e "    ${CYAN}sudo zypper --non-interactive install -y${NC}"
+            ;;
+        *)
+            echo -e "  Unrecognized package manager ($PKG_MANAGER) — fix your system"
+            echo -e "  package manager manually, then re-run this installer."
+            ;;
+    esac
+    echo -e "  Then re-run: ${CYAN}sudo bash install.sh${NC}"
+    exit 1
+fi
+
+STATUS[required_pkgs]="ok"
+
+# Re-detect Python after install
+if [[ -z "$PYTHON_CMD" ]]; then
+    for cmd in python3.12 python3.11 python3.10 python3; do
+        if command -v "$cmd" &>/dev/null; then
+            PYTHON_CMD="$cmd"
+            break
+        fi
+    done
+fi
+
+if [[ -z "$PYTHON_CMD" ]]; then
+    fail "Python3 is still not available after installation. Cannot continue."
+    exit 1
+fi
+
+info "Using Python: $($PYTHON_CMD --version)"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# STEP 3: INSTALL OPTIONAL PACKAGES
+# ═══════════════════════════════════════════════════════════════════════════════
+step "Step 3/9: Installing optional packages"
+
+for generic in nodejs npm; do
+    actual=$(pkg_name "$generic")
+    if install_one_pkg "$actual"; then
+        ok "$actual"
+    else
+        skip "$actual — not available (games requiring Node.js won't work, but BBS will run fine)"
+    fi
+done
+
+if [[ "$ENABLE_NGINX" == "y" ]]; then
+    actual=$(pkg_name "nginx")
+    if install_one_pkg "$actual"; then
+        ok "$actual"
+        STATUS[nginx_pkg]="ok"
+    else
+        warn "nginx failed to install. You can set up a reverse proxy manually later."
+        STATUS[nginx_pkg]="fail"
+        ENABLE_NGINX="n"
+    fi
+fi
+
+if [[ "$ENABLE_SSL" == "y" ]]; then
+    actual_certbot=$(pkg_name "certbot")
+    actual_plugin=$(pkg_name "certbot-nginx")
+    CERTBOT_OK=false
+
+    if install_one_pkg "$actual_certbot" && install_one_pkg "$actual_plugin"; then
+        ok "certbot (via $PKG_MANAGER)"
+        CERTBOT_OK=true
+    else
+        warn "certbot failed via $PKG_MANAGER, trying snap..."
+        if command -v snap &>/dev/null || install_one_pkg "snapd"; then
+            snap install core 2>/dev/null || true
+            if snap install --classic certbot 2>/dev/null; then
+                ln -sf /snap/bin/certbot /usr/bin/certbot 2>/dev/null || true
+                ok "certbot (via snap)"
+                CERTBOT_OK=true
+            fi
+        fi
+    fi
+
+    if ! $CERTBOT_OK; then
+        warn "certbot could not be installed. SSL will be skipped."
+        warn "You can set up SSL manually later with: certbot --nginx -d $DOMAIN"
+        ENABLE_SSL="n"
+    fi
+fi
+
+if [[ "$INSTALL_DOSBOX" == "y" ]]; then
+    # Prefer dosbox-staging (better TCP nullmodem support); fall back to vanilla.
+    if install_one_pkg "dosbox-staging" 2>/dev/null; then
+        ok "dosbox-staging"
+    elif install_one_pkg "$(pkg_name "dosbox")"; then
+        ok "dosbox (vanilla)"
+    else
+        skip "DOSBox — door games using DOSBox won't work"
+    fi
+fi
+
+if [[ "$INSTALL_DOSEMU" == "y" ]]; then
+    # dosemu2 is natively apt-packageable on Debian/Ubuntu. It is NOT in
+    # Fedora/RHEL's default repos (needs RPM Fusion or a COPR), is
+    # AUR-only on Arch (not in the official repos at all), and its
+    # openSUSE packaging status is unclear. Rather than silently doing
+    # nothing or claiming success it didn't achieve, this always
+    # attempts the native package name first (works on apt, predictably
+    # fails elsewhere) and, on failure, prints exact per-distro
+    # follow-up guidance instead of a generic "skip" -- a sysop on
+    # Fedora/Arch/openSUSE needs to know WHERE to get it, not just that
+    # this installer couldn't. Deliberately does NOT attempt to build an
+    # AUR package as root inside an unattended installer.
+    if install_one_pkg "dosemu2" 2>/dev/null; then
+        ok "dosemu2"
+    else
+        case "$PKG_MANAGER" in
+            dnf|yum)
+                skip "dosemu2 — not in Fedora/RHEL default repos. Enable RPM Fusion" \
+                     "or a COPR providing dosemu2, then: sudo $PKG_MANAGER install dosemu2"
+                ;;
+            pacman)
+                skip "dosemu2 — AUR-only on Arch, not in the official repos. Install" \
+                     "an AUR helper (yay/paru) then: yay -S dosemu2"
+                ;;
+            zypper)
+                skip "dosemu2 — not confirmed in openSUSE default repos. Check the" \
+                     "Packman repo, or build from source: https://github.com/dosemu2/dosemu2"
+                ;;
+            *)
+                skip "dosemu2 — door_dosemu games (e.g. TW2002-style doors) won't work" \
+                     "until it's installed manually for your distro"
+                ;;
+        esac
+    fi
+fi
+
+if [[ "$INSTALL_CLAMAV" == "y" ]]; then
+    if install_one_pkg "clamav" && install_one_pkg "clamav-daemon"; then
+        ok "clamav + clamav-daemon"
+        # First freshclam can take a minute; do it in the background so install
+        # doesn't block. Service starts when ready.
+        systemctl enable --now clamav-freshclam 2>/dev/null || true
+        systemctl enable --now clamav-daemon 2>/dev/null || true
+    else
+        skip "ClamAV — virus scan on uploads will be silently disabled"
+    fi
+fi
+
+if [[ "$INSTALL_LHASA" == "y" ]]; then
+    if install_one_pkg "lhasa"; then
+        ok "lhasa (.lzh archive support)"
+    else
+        skip "lhasa — FILE_ID.DIZ extraction from .lzh archives won't work"
+    fi
+fi
+
+if [[ "$INSTALL_SIXEL" == "y" ]]; then
+    sixel_ok=false
+    actual=$(pkg_name "libsixel-bin")
+    if install_one_pkg "$actual"; then
+        ok "$actual (img2sixel — sixel images in terminal RSS reader/Gallery)"
+        sixel_ok=true
+    else
+        skip "libsixel — sixel rendering will be skipped (chafa fallback only)"
+    fi
+    chafa_ok=false
+    actual=$(pkg_name "chafa")
+    if install_one_pkg "$actual"; then
+        ok "$actual (Unicode-block image rendering — works in any terminal)"
+        chafa_ok=true
+    else
+        skip "chafa — terminal Gallery viewer will fall back to sixel-only"
+    fi
+    if $sixel_ok || $chafa_ok; then
+        STATUS[terminal_images]="ok"
+    else
+        STATUS[terminal_images]="fail"
+    fi
+fi
+
+# ─── Optional: Mystic BBS runtime + mplc compiler ────────────────────────────
+# Mystic isn't apt-packaged. We download the official freeware tarball
+# from mysticbbs.com and extract just the two binaries we need:
+#   /opt/mystic/mystic   — runs compiled .mpx Pascal scripts
+#   /opt/mystic/mplc     — compiles .mps source -> .mpx
+# Soft-fails on download issues (no network, URL changed, etc.) so a
+# headless install doesn't abort just because we couldn't fetch Mystic.
+if [[ "$INSTALL_MYSTIC" == "y" ]]; then
+    MYSTIC_DIR="/opt/mystic"
+    BUNDLED_MYSTIC="$SOURCE_DIR/vendor/mystic"
+
+    if [[ -x "$BUNDLED_MYSTIC/mystic" && -x "$BUNDLED_MYSTIC/mplc" ]]; then
+        # Bundled inside the alpha tarball — copy the whole tree.
+        # Mystic at runtime expects its data/menus/themes dirs next to the
+        # binary, so we ship the full freeware install (~5 MB) rather than
+        # just the two ELFs.
+        info "Installing bundled Mystic BBS runtime + mplc compiler..."
+        mkdir -p "$MYSTIC_DIR"
+        cp -a "$BUNDLED_MYSTIC/." "$MYSTIC_DIR/"
+        chmod +x "$MYSTIC_DIR/mystic" "$MYSTIC_DIR/mplc" 2>/dev/null || true
+        ln -sf "$MYSTIC_DIR/mplc"   /usr/local/bin/mplc   2>/dev/null || true
+        ln -sf "$MYSTIC_DIR/mystic" /usr/local/bin/mystic 2>/dev/null || true
+        ok "mystic + mplc installed to $MYSTIC_DIR (from bundled copy)"
+        STATUS[mystic]="ok"
+        MYSTIC_INSTALLED="y"
+    else
+        # Fallback path — vendor/mystic missing (e.g. running from a slim
+        # checkout). Pull the installer from mysticbbs.com.
+        #
+        # Real bug found live: this always fetched the x86_64 build
+        # regardless of host architecture. On an ARM install (a Pi, most
+        # obviously) that silently "succeeds" -- the archive downloads and
+        # extracts fine -- but the resulting mystic/mplc binaries are
+        # x86_64 ELFs that fail with "Exec format error" the instant
+        # anything (door_mystic/door_mystic_mps) actually tries to run
+        # them. Mystic BBS does publish real ARM builds (confirmed
+        # against the actual mysticbbs.com downloads page) -- pick the
+        # right one instead of assuming x86_64 unconditionally. armv7l
+        # covers the 32-bit ARMHF build (Pi 1/2, ODROID); aarch64 covers
+        # the 64-bit build (Pi 4+, Orange Pi 5). The ARM archives are
+        # .zip (needs unzip), not .rar like the x86 ones.
+        info "Bundled mystic not found — downloading Mystic BBS installer..."
+        HOST_ARCH="$(uname -m)"
+        case "$HOST_ARCH" in
+            x86_64|amd64)
+                MYSTIC_URL="https://mysticbbs.com/downloads/mys112a48_l64.rar"
+                MYSTIC_ARCHIVE_TYPE="rar"
+                ;;
+            i686|i386)
+                MYSTIC_URL="https://mysticbbs.com/downloads/mys112a48_l32.rar"
+                MYSTIC_ARCHIVE_TYPE="rar"
+                ;;
+            aarch64|arm64)
+                MYSTIC_URL="https://mysticbbs.com/downloads/mys112a48_p64.zip"
+                MYSTIC_ARCHIVE_TYPE="zip"
+                ;;
+            armv7l|armhf|armv6l)
+                MYSTIC_URL="https://mysticbbs.com/downloads/mys112a48_p32.zip"
+                MYSTIC_ARCHIVE_TYPE="zip"
+                ;;
+            *)
+                MYSTIC_URL=""
+                MYSTIC_ARCHIVE_TYPE=""
+                ;;
+        esac
+
+        if [[ -z "$MYSTIC_URL" ]]; then
+            warn "Mystic — no known build for host architecture '$HOST_ARCH'."
+            warn "       You can install manually later: drop mystic + mplc"
+            warn "       binaries in $MYSTIC_DIR/ and re-run with MYSTIC_BBS_PATH set."
+            STATUS[mystic]="fail"
+        else
+        TMP_ARCHIVE="/tmp/mystic-runtime.$MYSTIC_ARCHIVE_TYPE"
+        TMP_STAGE="/tmp/mystic-installer-$$"
+
+        if [[ "$MYSTIC_ARCHIVE_TYPE" == "rar" ]] && ! command -v unrar &>/dev/null; then
+            info "Installing unrar (needed to extract Mystic archive)..."
+            install_one_pkg unrar 2>/dev/null || install_one_pkg unrar-free 2>/dev/null || true
+        elif [[ "$MYSTIC_ARCHIVE_TYPE" == "zip" ]] && ! command -v unzip &>/dev/null; then
+            info "Installing unzip (needed to extract Mystic archive)..."
+            install_one_pkg unzip 2>/dev/null || true
+        fi
+
+        mkdir -p "$MYSTIC_DIR" "$TMP_STAGE"
+        if curl -fsSL --connect-timeout 15 --max-time 180 \
+                -o "$TMP_ARCHIVE" "$MYSTIC_URL" 2>/dev/null; then
+            EXTRACT_OK=""
+            if [[ "$MYSTIC_ARCHIVE_TYPE" == "zip" ]]; then
+                if command -v unzip &>/dev/null; then
+                    (cd "$TMP_STAGE" && unzip -q -o "$TMP_ARCHIVE" >/dev/null 2>&1) && EXTRACT_OK=1
+                elif command -v 7z &>/dev/null; then
+                    7z x -y -o"$TMP_STAGE" "$TMP_ARCHIVE" >/dev/null 2>&1 && EXTRACT_OK=1
+                fi
+            else
+                if command -v unrar &>/dev/null; then
+                    (cd "$TMP_STAGE" && unrar x -y "$TMP_ARCHIVE" >/dev/null 2>&1) && EXTRACT_OK=1
+                elif command -v 7z &>/dev/null; then
+                    7z x -y -o"$TMP_STAGE" "$TMP_ARCHIVE" >/dev/null 2>&1 && EXTRACT_OK=1
+                fi
+            fi
+            # The archive contains a Mystic *installer* binary (./install),
+            # not the runtime. Run it in unattended auto mode to extract
+            # everything. Confirmed the ARM64 (.zip) archive uses the exact
+            # same ./install auto <dir> overwrite convention as the x86_64
+            # (.rar) one -- same installer, just built for the matching arch.
+            if [[ -n "$EXTRACT_OK" && -x "$TMP_STAGE/install" ]]; then
+                if (cd "$TMP_STAGE" && ./install auto "$MYSTIC_DIR" overwrite >/dev/null 2>&1); then
+                    chmod +x "$MYSTIC_DIR/mystic" "$MYSTIC_DIR/mplc" 2>/dev/null || true
+                    ln -sf "$MYSTIC_DIR/mplc"   /usr/local/bin/mplc   2>/dev/null || true
+                    ln -sf "$MYSTIC_DIR/mystic" /usr/local/bin/mystic 2>/dev/null || true
+                    if [[ -x "$MYSTIC_DIR/mystic" && -x "$MYSTIC_DIR/mplc" ]]; then
+                        ok "mystic + mplc installed to $MYSTIC_DIR ($HOST_ARCH)"
+                        STATUS[mystic]="ok"
+                        MYSTIC_INSTALLED="y"
+                    else
+                        skip "Mystic — installer ran but mystic/mplc missing in $MYSTIC_DIR"
+                    fi
+                else
+                    skip "Mystic — installer auto-run failed"
+                fi
+            elif [[ -n "$EXTRACT_OK" ]]; then
+                skip "Mystic — no ./install binary inside the archive"
+            else
+                skip "Mystic — archive extract failed (need unrar/unzip or 7z)"
+            fi
+            rm -f "$TMP_ARCHIVE" 2>/dev/null || true
+            rm -rf "$TMP_STAGE" 2>/dev/null || true
+        else
+            warn "Mystic — download from $MYSTIC_URL failed."
+            warn "       You can install manually later: drop mystic + mplc"
+            warn "       binaries in $MYSTIC_DIR/ and re-run with MYSTIC_BBS_PATH set."
+            STATUS[mystic]="fail"
+        fi
+        fi
+    fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# STEP 4: CREATE SYSTEM USER & DIRECTORIES
+# ═══════════════════════════════════════════════════════════════════════════════
+step "Step 4/9: Creating system user and directories"
+
+if id "$SERVICE_USER" &>/dev/null; then
+    info "User '$SERVICE_USER' already exists."
+else
+    useradd -r -d "$INSTALL_DIR" -s /usr/sbin/nologin "$SERVICE_USER" 2>/dev/null || \
+    useradd -r -d "$INSTALL_DIR" -s /bin/false "$SERVICE_USER" 2>/dev/null || \
+    { fail "Could not create user '$SERVICE_USER'"; exit 1; }
+    ok "Created system user: $SERVICE_USER"
+fi
+
+mkdir -p "$INSTALL_DIR"
+ok "Install directory: $INSTALL_DIR"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# STEP 5: COPY APPLICATION FILES
+# ═══════════════════════════════════════════════════════════════════════════════
+step "Step 5/9: Deploying application files"
+
+if [[ "$SOURCE_DIR" != "$INSTALL_DIR" ]]; then
+    info "Copying files from $SOURCE_DIR to $INSTALL_DIR ..."
+    # MRC bridge config + per-network configs + per-network data dirs are
+    # intentionally excluded: they hold the *previous* sysop's BBS handle,
+    # MRC server, and chat-profile state from whatever box built the
+    # tarball. config.json is regenerated in step 7 from the wizard
+    # inputs; per-network configs / data dirs are sysop-created at
+    # runtime via the admin UI.
+    rsync -a --exclude='.git' --exclude='venv' --exclude='__pycache__' \
+          --exclude='*.pyc' --exclude='data/*.db' \
+          --exclude='/mrc/bridge/config.json' \
+          --exclude='/mrc/bridge/config/' \
+          --exclude='/mrc/bridge/data-*/' \
+          "$SOURCE_DIR/" "$INSTALL_DIR/"
+    ok "Files deployed"
+else
+    info "Already running from install directory."
+    ok "Files in place"
+fi
+
+# Create all data directories
+for d in data data/uploads data/avatars data/games data/dos-games data/echomail data/mrc data/text data/text/menus logs anetbbs/logs; do
+    mkdir -p "$INSTALL_DIR/$d"
+done
+ok "Data directories created"
+
+# Set ownership with proper permissions — service user must be able
+# to write to data/, logs/, and the entire install tree.
+# Note: anetbbs/core, anetbbs/features, and anetbbs/main.py are real files in the
+# repo now — no symlink or shim hacks needed.
+chown -R "$SERVICE_USER":"$SERVICE_USER" "$INSTALL_DIR"
+chmod -R u+rwX "$INSTALL_DIR"
+chmod 755 "$INSTALL_DIR/data" "$INSTALL_DIR/logs"
+# sbbs_stubs ships from a Synchronet install with mode 700 — anetbbs.js
+# door scripts read these files at runtime, so they need to be readable
+# by the service user even when the install dir is owned by the sysop.
+if [[ -d "$INSTALL_DIR/anetbbs/games/sbbs_stubs" ]]; then
+    chmod -R g+rX,o+rX "$INSTALL_DIR/anetbbs/games/sbbs_stubs"
+fi
+# Door save dirs: doors run as $SERVICE_USER and need to write here even
+# if the door tree was dropped in by a sysop's regular account.
+if [[ -d "$INSTALL_DIR/doors" ]]; then
+    chmod -R g+rwX "$INSTALL_DIR/doors"
+fi
+ok "Ownership and permissions set to $SERVICE_USER"
+
+STATUS[files]="ok"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# STEP 6: PYTHON VIRTUAL ENVIRONMENT & DEPENDENCIES
+# ═══════════════════════════════════════════════════════════════════════════════
+step "Step 6/9: Setting up Python environment"
+
+VENV_DIR="$INSTALL_DIR/venv"
+
+if [[ ! -d "$VENV_DIR" ]]; then
+    info "Creating virtual environment..."
+    sudo -u "$SERVICE_USER" "$PYTHON_CMD" -m venv "$VENV_DIR" 2>/dev/null || \
+    "$PYTHON_CMD" -m venv "$VENV_DIR" 2>/dev/null || \
+    { fail "Could not create Python virtual environment."; exit 1; }
+    ok "Virtual environment created"
+else
+    info "Virtual environment already exists."
+fi
+
+info "Upgrading pip..."
+sudo -u "$SERVICE_USER" "$VENV_DIR/bin/pip" install --upgrade pip --quiet 2>/dev/null || \
+"$VENV_DIR/bin/pip" install --upgrade pip --quiet 2>/dev/null || true
+
+info "Installing ANetBBS Python dependencies (this may take a minute)..."
+cd "$INSTALL_DIR"
+PIP_LOG=$(mktemp)
+# --prefer-binary: use pre-built wheels when available (avoids source-compile
+# failures on ARM64 / Pi where Rust/C toolchains may be incomplete).
+if sudo -u "$SERVICE_USER" "$VENV_DIR/bin/pip" install --prefer-binary -e "$INSTALL_DIR" 2>"$PIP_LOG" || \
+   "$VENV_DIR/bin/pip" install --prefer-binary -e "$INSTALL_DIR" 2>"$PIP_LOG"; then
+    ok "Python dependencies installed"
+    STATUS[python]="ok"
+else
+    if sudo -u "$SERVICE_USER" "$VENV_DIR/bin/pip" install --prefer-binary "$INSTALL_DIR" 2>"$PIP_LOG" || \
+       "$VENV_DIR/bin/pip" install --prefer-binary "$INSTALL_DIR" 2>"$PIP_LOG"; then
+        ok "Python dependencies installed (non-editable)"
+        STATUS[python]="ok"
+    else
+        fail "pip install failed — output below:"
+        cat "$PIP_LOG" | while read -r line; do echo -e "    ${DIM}$line${NC}"; done
+        fail "Fix the dependency error above, then re-run install.sh."
+        STATUS[python]="fail"
+    fi
+fi
+rm -f "$PIP_LOG"
+
+# Verify that the package actually imports cleanly. setup.py declares aiohttp
+# as a dependency now, so a successful pip install above already pulled it in.
+info "Verifying package imports..."
+if "$VENV_DIR/bin/python" -c "from anetbbs.main import main; from anetbbs.web_app import create_app; print('OK')" 2>/dev/null; then
+    ok "anetbbs package verified (telnet, web entry points OK)"
+else
+    fail "anetbbs package failed to import — check logs above for ModuleNotFoundError"
+    STATUS[python]="fail"
+fi
+
+# Fix ownership again after pip install (pip may have created files as root)
+chown -R "$SERVICE_USER":"$SERVICE_USER" "$INSTALL_DIR"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# STEP 7: GENERATE CONFIGURATION
+# ═══════════════════════════════════════════════════════���═══════════════════════
+step "Step 7/9: Generating configuration"
+
+ENV_FILE="$INSTALL_DIR/.env"
+
+if [[ -f "$ENV_FILE" ]] && ! $FORCE_OVERWRITE; then
+    info ".env already exists — skipping (use --force to overwrite)"
+    skip ".env preserved"
+else
+# ★ FIX 4: Use ABSOLUTE path for DATABASE_URL so gunicorn can always find
+# the SQLite file regardless of its WorkingDirectory.
+# Also set DATA_DIR explicitly so config.py resolves correctly.
+cat > "$ENV_FILE" << ENVEOF
+# ANetBBS Configuration
+# Generated by install.sh on $(date)
+
+# Environment
+FLASK_ENV=production
+
+# Security
+SECRET_KEY=$SECRET_KEY
+# Set to true only when the web interface is served over HTTPS (e.g. via nginx
+# with TLS). Leaving false lets HTTP-only installs work; with true the browser
+# silently drops the session cookie on plain HTTP, breaking login (CSRF error).
+SESSION_COOKIE_SECURE=$( [[ "$ENABLE_SSL" == "y" ]] && echo "true" || echo "false" )
+
+# Database — ABSOLUTE path so it works from any working directory
+DATABASE_URL=sqlite:///${INSTALL_DIR}/data/anetbbs.db
+
+# Telnet Server
+TELNET_ENABLED=$( [ "$ENABLE_TELNET" = "y" ] && echo "true" || echo "false" )
+TELNET_HOST=0.0.0.0
+TELNET_PORT=$TELNET_PORT
+
+# SSH Server
+SSH_ENABLED=$( [ "$ENABLE_SSH" = "y" ] && echo "true" || echo "false" )
+SSH_HOST=0.0.0.0
+SSH_PORT=$SSH_PORT
+SSH_HOST_KEY_FILE=${INSTALL_DIR}/data/ssh_host_key
+
+# rlogin (disabled)
+RLOGIN_ENABLED=false
+RLOGIN_HOST=0.0.0.0
+RLOGIN_PORT=513
+
+# PETSCII (Commodore 64/128 terminal support, Phase 1 -- disabled by
+# default; sysop opts in manually by editing .env, same as rlogin)
+PETSCII40_ENABLED=false
+PETSCII40_HOST=0.0.0.0
+PETSCII40_PORT=6400
+PETSCII80_ENABLED=false
+PETSCII80_HOST=0.0.0.0
+PETSCII80_PORT=6401
+
+# Web Server
+WEB_HOST=0.0.0.0
+# WEB_BIND is what deploy/serve.py actually binds the socketio/gunicorn
+# listener to (WEB_HOST above is read by a different, unrelated code
+# path) -- real bug found live: test mode's whole security promise
+# ("gunicorn binds 127.0.0.1 -- no port exposed to the LAN") was silently
+# false because this line never existed, so serve.py always fell back to
+# its own 0.0.0.0 default regardless of install mode.
+WEB_BIND=$WEB_BIND
+WEB_PORT=$WEB_PORT
+
+# Trust X-Forwarded-For/X-Forwarded-Proto/X-Forwarded-Host from the
+# reverse proxy in front of Flask (via Werkzeug's ProxyFix) so IP bans,
+# country blocking, and login rate-limiting see the real visitor IP
+# instead of nginx's own loopback address. Only ever set true here when
+# THIS installer is also the one that set up nginx in front of the app
+# AND opened only 80/443 in the firewall (never WEB_PORT itself) -- see
+# the UFW section below. If you enabled nginx yourself after the fact,
+# or you're running behind some other reverse proxy this installer
+# didn't configure, set this to true by hand only once you've confirmed
+# Flask itself is not directly reachable from outside — see
+# docs/SECURITY.md's X-Forwarded-For section before changing this.
+TRUST_PROXY_HEADERS=$([[ "$ENABLE_NGINX" == "y" ]] && echo true || echo false)
+
+# Application
+BBS_NAME=$BBS_NAME
+BBS_DESCRIPTION=$BBS_DESC
+SYSOP_NAME=$SYSOP_NAME
+
+# Inter-BBS Instant Messaging (MSP / RFC 1312, ports 18 TCP + 11 UDP).
+# Disabled here means the listener threads don't start; outbound /imsg/send
+# from the web UI still works.
+MSP_ENABLED=$([[ "$ENABLE_MSP" == "y" ]] && echo true || echo false)
+SYSTAT_ENABLED=$([[ "$ENABLE_MSP" == "y" ]] && echo true || echo false)
+
+# Logging
+LOG_LEVEL=INFO
+
+# Games
+GAMES_ENABLED=true
+GAMES_MAX_NODES=10
+GAMES_SESSION_TIMEOUT=3600
+DOSBOX_PATH=/usr/bin/dosbox
+DOSEMU_PATH=/usr/bin/dosemu
+NODEJS_PATH=$(command -v node 2>/dev/null || echo "/usr/bin/node")
+MYSTIC_PYTHON_PATH=
+MYSTIC_BBS_PATH=$([[ "${MYSTIC_INSTALLED:-n}" == "y" ]] && echo "/opt/mystic/mystic" || echo "/usr/local/bin/mystic")
+MYSTIC_MPLC_PATH=$([[ "${MYSTIC_INSTALLED:-n}" == "y" ]] && echo "/opt/mystic/mplc" || echo "")
+
+# Echomail
+ECHOMAIL_ENABLED=true
+ECHOMAIL_POLL_ENABLED=true
+ECHOMAIL_ORIGIN_LINE=$BBS_NAME - $BBS_DESC
+ECHOMAIL_TEAR_LINE=--- $BBS_NAME
+
+# MRC Bridge
+MRC_BRIDGE_HOST=localhost
+MRC_BRIDGE_PORT=$MRC_BRIDGE_PORT_DEFAULT
+MRC_BRIDGE_USE_SSL=false
+MRC_BRIDGE_WS_PATH=/mrcws
+# Bookkeeping only for install.sh/update.sh -- not read by the app itself.
+# The standalone binkp/finger/mrc-bridge processes are gated purely by
+# whether their systemd unit exists and is enabled, not by this value;
+# it exists so update.sh can tell, on a self-heal run, whether a
+# freshly-created unit should actually be started (see update.sh).
+BINKP_ENABLED=$([[ "$ENABLE_BINKP" == "y" ]] && echo true || echo false)
+FINGER_ENABLED=$([[ "$ENABLE_FINGER" == "y" ]] && echo true || echo false)
+MRC_BRIDGE_ENABLED=$([[ "$ENABLE_MRC" == "y" ]] && echo true || echo false)
+ENVEOF
+
+chown "$SERVICE_USER":"$SERVICE_USER" "$ENV_FILE"
+chmod 600 "$ENV_FILE"
+ok ".env generated"
+fi
+
+# ─── SSH Host Key ──────────────────────────────────────────────────────────────
+SSH_KEY_FILE="$INSTALL_DIR/data/ssh_host_key"
+if [[ ! -f "$SSH_KEY_FILE" ]] && [[ "$ENABLE_SSH" == "y" ]]; then
+    info "Generating SSH host key..."
+    sudo -u "$SERVICE_USER" ssh-keygen -t rsa -b 2048 -f "$SSH_KEY_FILE" -N "" -q 2>/dev/null || \
+    ssh-keygen -t rsa -b 2048 -f "$SSH_KEY_FILE" -N "" -q 2>/dev/null || true
+    ok "SSH host key generated"
+fi
+# Always reassert ownership/mode — covers re-runs where the key was
+# generated by an earlier shell user (e.g. sysop ran ssh-keygen by hand)
+# and the service account can't read it.
+if [[ -f "$SSH_KEY_FILE" ]]; then
+    chown "$SERVICE_USER":"$SERVICE_USER" "$SSH_KEY_FILE" "$SSH_KEY_FILE.pub" 2>/dev/null || true
+    chmod 600 "$SSH_KEY_FILE" 2>/dev/null || true
+    chmod 644 "$SSH_KEY_FILE.pub" 2>/dev/null || true
+fi
+
+# ─── Pre-create application log so the service user owns it from the start ────
+APP_LOG_FILE="$INSTALL_DIR/logs/anetbbs.log"
+touch "$APP_LOG_FILE" 2>/dev/null || true
+chown "$SERVICE_USER":"$SERVICE_USER" "$APP_LOG_FILE" 2>/dev/null || true
+chmod 664 "$APP_LOG_FILE" 2>/dev/null || true
+
+# ─── MRC Bridge config.json ────────────────────────────────────────────────────
+# Always generated from the install wizard inputs — never copied from the
+# source tarball (Step 5's rsync excludes mrc/bridge/config.json) so that
+# the sysop who built the tarball can't leak their own BBS info to a
+# fresh installer. On re-runs the existing file is preserved.
+MRC_CONFIG_FILE="$INSTALL_DIR/mrc/bridge/config.json"
+if [[ ! -f "$MRC_CONFIG_FILE" ]]; then
+    info "Generating MRC bridge config from wizard inputs..."
+    mkdir -p "$INSTALL_DIR/mrc/bridge"
+    # Build info_web: prefer https when SSL is on, http otherwise, and skip
+    # the field entirely when the install is local-only (test mode).
+    if [[ "$DOMAIN" == "localhost" ]]; then
+        INFO_WEB=""
+    elif [[ "$ENABLE_SSL" == "y" ]]; then
+        INFO_WEB="https://$DOMAIN"
+    else
+        INFO_WEB="http://$DOMAIN"
+    fi
+    cat > "$MRC_CONFIG_FILE" << MRCEOF
+{
+  "mrc_backend": "$MRC_BACKEND",
+  "mrc_host": "mrc.bottomlessabyss.net",
+  "mrc_port": 5001,
+  "use_ssl": true,
+  "bridge_bbs": "$BBS_NAME",
+  "platform_info": "ANETBBS/Linux.$(uname -m)/$MRC_CLIENT_COMPAT_VERSION",
+  "info_web": "$INFO_WEB",
+  "info_sysop": "$ADMIN_USER",
+  "info_desc": "$BBS_DESC",
+  "capabilities": ["MCI", "MSGEXT", "CTCP"],
+  "web_listen_host": "127.0.0.1",
+  "web_listen_port": $MRC_BRIDGE_PORT_DEFAULT,
+  "message_rate_seconds": 0.5,
+  "iamhere_interval_seconds": 60,
+  "log_level": "INFO",
+  "data_dir": "$INSTALL_DIR/data/mrc"
+}
+MRCEOF
+    chown "$SERVICE_USER":"$SERVICE_USER" "$MRC_CONFIG_FILE"
+    chmod 640 "$MRC_CONFIG_FILE"
+    ok "MRC bridge config.json generated (sysop: $ADMIN_USER, BBS: $BBS_NAME)"
+else
+    info "MRC bridge config.json already exists — preserving"
+    skip "mrc/bridge/config.json preserved (delete it and re-run to regenerate)"
+fi
+
+# ─── Database setup: preserve existing DB; only create fresh if none exists ───
+DB_FILE="$INSTALL_DIR/data/anetbbs.db"
+if [[ -f "$DB_FILE" ]] && ! $FORCE_OVERWRITE; then
+    info "Existing database found — preserving data (db.create_all() will add any missing tables)"
+    skip "Database preserved"
+elif [[ -f "$DB_FILE" ]] && $FORCE_OVERWRITE; then
+    DB_BAK="${DB_FILE}.bak.$(date +%Y%m%d%H%M%S)"
+    info "Existing database found — backing up to $(basename "$DB_BAK") (--force)"
+    cp "$DB_FILE" "$DB_BAK"
+    rm -f "$DB_FILE" "${DB_FILE}-journal" "${DB_FILE}-wal" "${DB_FILE}-shm"
+    ok "Old database backed up; a fresh database will be created"
+fi
+
+# ─── Set admin password via Python ─────────────────────────────────────────────
+# Whether an existing admin account (matched by username typed into the
+# wizard above) gets its password silently reset. Without this guard, any
+# re-run of install.sh against an already-provisioned DB either quietly
+# overwrote the real sysop's password (if the same username was retyped)
+# or created a second, duplicate is_admin=True account (if it wasn't) --
+# neither with any warning. Mirrors the .env/.db skip-unless---force
+# pattern already used elsewhere in this same step.
+PY_FORCE_OVERWRITE=$($FORCE_OVERWRITE && echo True || echo False)
+ADMIN_PRESERVED=false
+if [[ "${STATUS[python]:-}" != "ok" ]]; then
+    warn "Skipping admin account setup — Python environment failed to install."
+    warn "Fix the pip error above, then re-run: sudo bash $INSTALL_DIR/install.sh"
+else
+# ★ FIX 5: Ensure the data directory is writable by service user BEFORE we
+# create the database, and run the admin setup as the SERVICE_USER so the
+# SQLite file is created with correct ownership from the start.
+info "Configuring sysop admin account..."
+chown -R "$SERVICE_USER":"$SERVICE_USER" "$INSTALL_DIR/data"
+chmod 755 "$INSTALL_DIR/data"
+
+cd "$INSTALL_DIR"
+ADMIN_RESULT=$(sudo -u "$SERVICE_USER" "$VENV_DIR/bin/python" << ADMINEOF
+import os, sys
+sys.path.insert(0, '$INSTALL_DIR')
+os.chdir('$INSTALL_DIR')
+os.environ['FLASK_ENV'] = 'production'
+os.environ['DATABASE_URL'] = 'sqlite:///${INSTALL_DIR}/data/anetbbs.db'
+os.environ['SECRET_KEY'] = '$SECRET_KEY'
+
+from dotenv import load_dotenv
+load_dotenv('$ENV_FILE')
+
+from anetbbs.web_app import create_app
+from anetbbs.models import db, User, EchomailNetwork, EchoArea, EchomailMessage, EchomailReadStatus, EchomailPollLog
+
+force_overwrite = $PY_FORCE_OVERWRITE
+
+app = create_app('production')
+with app.app_context():
+    db.create_all()
+    user = User.query.filter_by(username='$ADMIN_USER').first()
+    if user is None:
+        user = User(username='$ADMIN_USER', email='${ADMIN_USER}@${DOMAIN}', is_admin=True)
+        user.set_password('$ADMIN_PASS')
+        db.session.add(user)
+        db.session.commit()
+        print('CREATED')
+    elif force_overwrite:
+        user.set_password('$ADMIN_PASS')
+        user.is_admin = True
+        db.session.commit()
+        print('UPDATED')
+    else:
+        print('PRESERVED')
+
+    # create_app() above already ran _create_default_data(), which
+    # bootstraps a fallback account literally named "admin" (random
+    # password, logged once) if NO admin existed yet -- on a truly
+    # fresh install that fires before this script's own \$ADMIN_USER
+    # creation above, leaving two full-admin accounts. Clean up that
+    # fallback now if it's redundant: a different username than the one
+    # just configured, and never actually used (last_login is NULL) --
+    # never touches an "admin"-named account the sysop has actually
+    # logged into, since that would mean it's the one they're using.
+    if '$ADMIN_USER' != 'admin':
+        stray = User.query.filter_by(username='admin', is_admin=True).first()
+        if stray is not None and stray.last_login is None:
+            db.session.delete(stray)
+            db.session.commit()
+            print('STRAY_ADMIN_REMOVED')
+ADMINEOF
+)
+ADMIN_RC=$?
+ADMIN_PRESERVED=false
+if [[ $ADMIN_RC -eq 0 ]]; then
+    case "$ADMIN_RESULT" in
+        *PRESERVED*) ADMIN_PRESERVED=true
+                     ok "Existing sysop account preserved ($ADMIN_USER) — password NOT changed (use --force to reset it)" ;;
+        *)           ok "Admin account configured ($ADMIN_USER)" ;;
+    esac
+    [[ "$ADMIN_RESULT" == *STRAY_ADMIN_REMOVED* ]] && \
+        ok "Removed an unused, auto-generated 'admin' fallback account (superseded by $ADMIN_USER)"
+else
+    # ★ FIX 5b: If running as service user fails, try as root then fix ownership
+    warn "Retrying admin setup as root..."
+    ADMIN_RESULT2=$("$VENV_DIR/bin/python" << ADMINEOF2
+import os, sys
+sys.path.insert(0, '$INSTALL_DIR')
+os.chdir('$INSTALL_DIR')
+os.environ['FLASK_ENV'] = 'production'
+os.environ['DATABASE_URL'] = 'sqlite:///${INSTALL_DIR}/data/anetbbs.db'
+os.environ['SECRET_KEY'] = '$SECRET_KEY'
+
+from dotenv import load_dotenv
+load_dotenv('$ENV_FILE')
+
+from anetbbs.web_app import create_app
+from anetbbs.models import db, User, EchomailNetwork, EchoArea, EchomailMessage, EchomailReadStatus, EchomailPollLog
+
+force_overwrite = $PY_FORCE_OVERWRITE
+
+app = create_app('production')
+with app.app_context():
+    db.create_all()
+    user = User.query.filter_by(username='$ADMIN_USER').first()
+    if user is None:
+        user = User(username='$ADMIN_USER', email='${ADMIN_USER}@${DOMAIN}', is_admin=True)
+        user.set_password('$ADMIN_PASS')
+        db.session.add(user)
+        db.session.commit()
+        print('CREATED')
+    elif force_overwrite:
+        user.set_password('$ADMIN_PASS')
+        user.is_admin = True
+        db.session.commit()
+        print('UPDATED')
+    else:
+        print('PRESERVED')
+
+    # See the matching comment in the first admin-setup attempt above --
+    # create_app() may have bootstrapped a redundant fallback "admin"
+    # account before \$ADMIN_USER was created; clean it up if unused.
+    if '$ADMIN_USER' != 'admin':
+        stray = User.query.filter_by(username='admin', is_admin=True).first()
+        if stray is not None and stray.last_login is None:
+            db.session.delete(stray)
+            db.session.commit()
+            print('STRAY_ADMIN_REMOVED')
+ADMINEOF2
+)
+    ADMIN_RC2=$?
+    if [[ $ADMIN_RC2 -eq 0 ]]; then
+        case "$ADMIN_RESULT2" in
+            *PRESERVED*) ADMIN_PRESERVED=true
+                         ok "Existing sysop account preserved ($ADMIN_USER) — password NOT changed (use --force to reset it)" ;;
+            *)           ok "Admin account configured ($ADMIN_USER)" ;;
+        esac
+        [[ "$ADMIN_RESULT2" == *STRAY_ADMIN_REMOVED* ]] && \
+            ok "Removed an unused, auto-generated 'admin' fallback account (superseded by $ADMIN_USER)"
+    else
+        warn "Could not configure admin account (you can use default: admin / admin123)"
+    fi
+    # Fix ownership after root created the db
+    chown -R "$SERVICE_USER":"$SERVICE_USER" "$INSTALL_DIR/data"
+fi
+fi  # end: STATUS[python] == ok guard
+
+# ★ FIX 6: Final ownership + permissions sweep on data directory
+# This catches both cases: db created as service user or as root
+chown -R "$SERVICE_USER":"$SERVICE_USER" "$INSTALL_DIR/data"
+chmod 755 "$INSTALL_DIR/data"
+chmod 644 "$INSTALL_DIR/data"/*.db 2>/dev/null || true
+
+STATUS[config]="ok"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# STEP 8: SYSTEMD SERVICES
+# ═══════════════════════════════════════════════════════════════════════════════
+step "Step 8/9: Installing systemd services"
+
+# ★ FIX 7: Remove any stale service files from previous installs before writing
+# fresh ones. This prevents old service files (e.g. from deploy/ templates that
+# reference /opt/anetbbs/venv/bin/anetbbs console script) from persisting.
+info "Cleaning up stale service files..."
+# anetbbs-telnet + anetbbs-ssh are legacy split-protocol services that
+# fought each other for ports because Ubuntu systemd's EnvironmentFile
+# wins over Environment= (opposite of documented behavior). Replaced by
+# a single anetbbs.service that reads .env and starts whichever of
+# telnet/ssh/rlogin are enabled. Stop+disable+remove the legacy units
+# on every install so the migration is clean.
+for svc in anetbbs-web anetbbs anetbbs-telnet anetbbs-ssh anetbbs-mrc-bridge anetbbs-finger anetbbs-binkp; do
+    systemctl stop "$svc" 2>/dev/null || true
+    systemctl disable "$svc" 2>/dev/null || true
+    rm -f "/etc/systemd/system/${svc}.service"
+done
+systemctl daemon-reload 2>/dev/null || true
+# and all paths are absolute so services work regardless of cwd.
+# The web service runs deploy/serve.py directly (reads WEB_BIND/WEB_PORT
+# from .env). The telnet/SSH/rlogin service runs the anetbbs console
+# script (matches what update.sh generates for the same unit).
+
+# ─── Web service ────────────────────────────────────────────────────────────��──
+cat > /etc/systemd/system/anetbbs-web.service << SVCEOF
+[Unit]
+Description=ANetBBS Web Application (eventlet WSGI)
+After=network.target
+
+[Service]
+Type=simple
+User=$SERVICE_USER
+Group=$SERVICE_USER
+WorkingDirectory=$INSTALL_DIR
+EnvironmentFile=$INSTALL_DIR/.env
+# CAP_NET_BIND_SERVICE lets the unprivileged service user bind to the
+# privileged ports MSP (TCP/18) and SYSTAT/ActiveUser (UDP/11). Without
+# this, those listeners fail to bind and inter-BBS IM is broken silently.
+# NOTE: We intentionally do NOT set CapabilityBoundingSet here so that
+# sudo (used by the Service Control Center) can still escalate.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+ExecStart=$VENV_DIR/bin/python $INSTALL_DIR/deploy/serve.py
+Restart=always
+RestartSec=5
+TimeoutStopSec=45
+KillMode=mixed
+
+[Install]
+WantedBy=multi-user.target
+SVCEOF
+ok "anetbbs-web.service"
+
+# ─── Terminal-protocol service (telnet/ssh/rlogin in one process) ──────────────
+# A single anetbbs.service owns telnet (2233), ssh (2234), and rlogin
+# (5132). Which protocols actually start is driven by the *_ENABLED
+# flags in $INSTALL_DIR/.env — no Environment= directives in this unit
+# because Ubuntu systemd treats EnvironmentFile as winning over them
+# (opposite of documented behavior), so the unit had no way to override
+# .env on the v1.0a release line. The collapsed design just trusts .env.
+# This replaces the legacy anetbbs-telnet.service + anetbbs-ssh.service
+# pair, which silently fought each other for ports.
+#
+# Always written, even if the sysop declines both Telnet and SSH here:
+# this same unit also owns rlogin/FTP/PETSCII40/PETSCII80, which the
+# wizard doesn't prompt for and can only be turned on later by hand-
+# editing .env — without the unit file on disk, there'd be nothing to
+# `systemctl enable --now` for those. update.sh already takes this same
+# unconditional-if-missing approach for upgrades; this matches it for
+# fresh installs.
+cat > /etc/systemd/system/anetbbs.service << SVCEOF
+[Unit]
+Description=ANetBBS terminal protocols (telnet / ssh / rlogin)
+After=network.target
+
+[Service]
+Type=simple
+User=$SERVICE_USER
+Group=$SERVICE_USER
+WorkingDirectory=$INSTALL_DIR
+EnvironmentFile=$INSTALL_DIR/.env
+# FTP on port 21 needs CAP_NET_BIND_SERVICE since the unit doesn't run as
+# root. Without this, a sysop who later sets FTP_ENABLED=true in .env
+# gets a listener that silently fails to bind (update.sh's own migration
+# block would self-heal this on the next upgrade, but a fresh install
+# should just grant it up front rather than depend on that). Unlike
+# anetbbs-web.service, nothing in this unit's own process ever calls
+# sudo, so CapabilityBoundingSet can safely match the Ambient set here
+# (matches what update.sh writes for the same unit).
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+ExecStart=$VENV_DIR/bin/anetbbs
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+SVCEOF
+ok "anetbbs.service"
+
+# ─── MRC Bridge service ────────────────────────────────────────────────────────
+if [[ "$ENABLE_MRC" == "y" ]]; then
+cat > /etc/systemd/system/anetbbs-mrc-bridge.service << SVCEOF
+[Unit]
+Description=ANetBBS MRC Bridge Service
+After=network.target
+
+[Service]
+Type=simple
+User=$SERVICE_USER
+Group=$SERVICE_USER
+WorkingDirectory=$INSTALL_DIR
+Environment=MRC_BRIDGE_CONFIG=$INSTALL_DIR/mrc/bridge/config.json
+ExecStart=$VENV_DIR/bin/python -m mrc.bridge.main
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+SVCEOF
+ok "anetbbs-mrc-bridge.service"
+fi
+
+# ─── Finger service ───────────────────────────────────────────────────────────
+# Privileged port 79. Production mode adds CAP_NET_BIND_SERVICE so the
+# unprivileged service user can bind it. Test mode skips this entirely.
+if [[ "$ENABLE_FINGER" == "y" ]]; then
+cat > /etc/systemd/system/anetbbs-finger.service << SVCEOF
+[Unit]
+Description=ANetBBS Finger Server (RFC 1288)
+After=network.target
+
+[Service]
+Type=simple
+User=$SERVICE_USER
+Group=$SERVICE_USER
+WorkingDirectory=$INSTALL_DIR
+EnvironmentFile=$INSTALL_DIR/.env
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+ExecStart=$VENV_DIR/bin/python -m anetbbs.core.finger_server
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+SVCEOF
+ok "anetbbs-finger.service"
+fi
+
+# ─── BinkP inbound listener service ────────────────────────────────────────────
+# FidoNet-style inbound mail (port 24554). Was asked about by the wizard,
+# shown as "Enabled" in the install summary, and had its firewall port
+# opened -- but the unit file itself was never actually written here,
+# only by update.sh's self-heal block (which this mirrors verbatim). A
+# sysop who answered "y" to BinkP got a summary saying "Enabled" and a
+# UFW hole for 24554, but no listener process at all until they
+# separately ran update.sh once.
+if [[ "$ENABLE_BINKP" == "y" ]]; then
+cat > /etc/systemd/system/anetbbs-binkp.service << SVCEOF
+[Unit]
+Description=ANetBBS BinkP Inbound Listener
+After=network.target
+
+[Service]
+Type=simple
+User=$SERVICE_USER
+Group=$SERVICE_USER
+WorkingDirectory=$INSTALL_DIR
+EnvironmentFile=$INSTALL_DIR/.env
+ExecStart=$VENV_DIR/bin/python -m anetbbs.echomail.binkp_server
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+SVCEOF
+ok "anetbbs-binkp.service"
+fi
+
+# ─── Reload and start ─────────────────────────────────────────────────────────
+systemctl daemon-reload
+
+# Clean up stale /tmp log files that may be owned by root from a previous run
+info "Cleaning up stale log files in /tmp..."
+rm -f /tmp/mrc_*.log 2>/dev/null || true
+
+if [[ "${STATUS[python]:-}" != "ok" ]]; then
+    warn "Skipping service starts — Python environment is not installed."
+    warn "Fix the pip error shown above, then re-run: sudo bash $INSTALL_DIR/install.sh"
+else
+
+SERVICES_TO_START=(anetbbs-web)
+# One service for all terminal protocols — telnet, ssh, rlogin live in
+# the same process driven by .env flags. Start it if any one is on.
+[[ "$ENABLE_TELNET" == "y" || "$ENABLE_SSH" == "y" ]] && SERVICES_TO_START+=(anetbbs)
+[[ "$ENABLE_MRC" == "y" ]]    && SERVICES_TO_START+=(anetbbs-mrc-bridge)
+[[ "$ENABLE_FINGER" == "y" ]] && SERVICES_TO_START+=(anetbbs-finger)
+[[ "$ENABLE_BINKP" == "y" ]]  && SERVICES_TO_START+=(anetbbs-binkp)
+
+for svc in "${SERVICES_TO_START[@]}"; do
+    systemctl enable "$svc" 2>/dev/null || true
+    systemctl restart "$svc" 2>/dev/null || true
+done
+
+# ★ FIX 10: Give services more time to start (especially gunicorn which loads
+# Flask + SQLAlchemy + creates tables on first boot)
+sleep 5
+
+for svc in "${SERVICES_TO_START[@]}"; do
+    if systemctl is-active --quiet "$svc"; then
+        ok "$svc is running"
+        STATUS[$svc]="ok"
+    else
+        bad "$svc failed to start"
+        STATUS[$svc]="fail"
+        warn "Last log lines:"
+        journalctl -u "$svc" --no-pager -n 10 2>/dev/null | while read -r line; do
+            echo -e "    ${DIM}$line${NC}"
+        done
+    fi
+done
+
+fi  # end: STATUS[python] == ok guard
+
+# ─── Optional: UFW firewall rules ─────────────────────────────────────────────
+if [[ "$CONFIGURE_UFW" == "y" ]]; then
+    if command -v ufw &>/dev/null; then
+        info "Opening BBS ports in UFW..."
+        if [[ "$ENABLE_NGINX" == "y" ]]; then
+            ufw allow 80/tcp  >/dev/null 2>&1 && ok "  80/tcp (HTTP)"
+            ufw allow 443/tcp >/dev/null 2>&1 && ok "  443/tcp (HTTPS)"
+        else
+            ufw allow "$WEB_PORT"/tcp >/dev/null 2>&1 && ok "  $WEB_PORT/tcp (web)"
+        fi
+        [[ "$ENABLE_TELNET" == "y" ]] && ufw allow "$TELNET_PORT"/tcp >/dev/null 2>&1 && ok "  $TELNET_PORT/tcp (telnet)"
+        [[ "$ENABLE_SSH" == "y" ]]    && ufw allow "$SSH_PORT"/tcp    >/dev/null 2>&1 && ok "  $SSH_PORT/tcp (ssh)"
+        if [[ "$ENABLE_MSP" == "y" ]]; then
+            ufw allow 18/tcp >/dev/null 2>&1 && ok "  18/tcp (MSP)"
+            ufw allow 11/udp >/dev/null 2>&1 && ok "  11/udp (SYSTAT)"
+        fi
+        [[ "$ENABLE_FINGER" == "y" ]] && ufw allow 79/tcp >/dev/null 2>&1 && ok "  79/tcp (Finger)"
+        [[ "$ENABLE_BINKP" == "y" ]]  && ufw allow 24554/tcp >/dev/null 2>&1 && ok "  24554/tcp (BinkP / FidoNet)"
+        if ufw status | grep -q "Status: active"; then
+            ufw reload >/dev/null 2>&1 && ok "  UFW reloaded"
+        else
+            warn "  UFW is inactive — rules added but firewall not enabled."
+            warn "  Run 'sudo ufw enable' when ready (after verifying SSH access works)."
+        fi
+    elif command -v firewall-cmd &>/dev/null; then
+        # firewalld is the default on Fedora/RHEL/openSUSE -- this
+        # installer only automates UFW today (real cross-distro firewall
+        # automation is out of scope for this pass), but printing
+        # correct per-port firewall-cmd commands instead of a bare "not
+        # UFW, skipping" at least tells the sysop exactly what to run.
+        warn "UFW is not installed, but firewalld is — this installer doesn't"
+        warn "automate firewalld yet. Open the needed ports yourself:"
+        if [[ "$ENABLE_NGINX" == "y" ]]; then
+            warn "  sudo firewall-cmd --permanent --add-port=80/tcp --add-port=443/tcp"
+        else
+            warn "  sudo firewall-cmd --permanent --add-port=$WEB_PORT/tcp"
+        fi
+        [[ "$ENABLE_TELNET" == "y" ]] && warn "  sudo firewall-cmd --permanent --add-port=$TELNET_PORT/tcp"
+        [[ "$ENABLE_SSH" == "y" ]]    && warn "  sudo firewall-cmd --permanent --add-port=$SSH_PORT/tcp"
+        [[ "$ENABLE_MSP" == "y" ]]    && warn "  sudo firewall-cmd --permanent --add-port=18/tcp --add-port=11/udp"
+        [[ "$ENABLE_FINGER" == "y" ]] && warn "  sudo firewall-cmd --permanent --add-port=79/tcp"
+        [[ "$ENABLE_BINKP" == "y" ]]  && warn "  sudo firewall-cmd --permanent --add-port=24554/tcp"
+        warn "  sudo firewall-cmd --reload"
+    else
+        warn "UFW is not installed — skipping firewall config."
+    fi
+fi
+
+# ─── sudoers + install sentinel ────────────────────────────────────────────────
+# Grants the service user passwordless sudo for exactly the systemctl/
+# journalctl/upgrade-wrapper commands the Service Control Center and the
+# web-triggered "Check for Updates" flow need. Previously ONLY update.sh
+# wrote this -- meaning on every fresh install, until the sysop
+# separately ran update.sh once, the SCC's Start/Stop/Restart buttons and
+# the web auto-update both failed with a bare "no sudo rights"-style
+# error. Mirrors update.sh's own block verbatim (same substitution +
+# visudo -cf validation before install).
+SUDOERS_SRC="$SOURCE_DIR/deploy/sudoers.anetbbs"
+SUDOERS_DST="/etc/sudoers.d/anetbbs"
+if [[ -f "$SUDOERS_SRC" ]]; then
+    info "Installing $SUDOERS_DST from deploy/sudoers.anetbbs (user: $SERVICE_USER)..."
+    UPGRADE_WRAPPER="$INSTALL_DIR/deploy/run_upgrade.sh"
+    RESTORE_WRAPPER="$INSTALL_DIR/deploy/run_restore.sh"
+    sed -e "s/^__SERVICE_USER__ /$SERVICE_USER /" \
+        -e "s|/opt/anetbbs/deploy/run_upgrade.sh|$UPGRADE_WRAPPER|g" \
+        -e "s|/opt/anetbbs/deploy/run_restore.sh|$RESTORE_WRAPPER|g" \
+        "$SUDOERS_SRC" > "$SUDOERS_DST.tmp"
+    if visudo -cf "$SUDOERS_DST.tmp" >/dev/null 2>&1; then
+        mv "$SUDOERS_DST.tmp" "$SUDOERS_DST"
+        chmod 0440 "$SUDOERS_DST"
+        ok "sudoers installed (SCC restart + Check-for-Updates auto-install will work)"
+    else
+        rm -f "$SUDOERS_DST.tmp"
+        warn "sudoers syntax check failed — Service Control Center buttons and web auto-update will not work until this is fixed manually."
+    fi
+else
+    warn "deploy/sudoers.anetbbs not found — skipping sudoers install."
+fi
+
+# Sentinel so the privileged upgrade wrapper (and any other future root
+# helper) can discover the install root without hardcoding a path.
+cat > /etc/anetbbs.install <<EOF
+# Written by install.sh — used by deploy/run_upgrade.sh to locate the
+# install root when invoked under sudo. Do not edit by hand; rerun
+# install.sh or update.sh to refresh.
+INSTALL_DIR=$INSTALL_DIR
+SERVICE_USER=$SERVICE_USER
+EOF
+chmod 0644 /etc/anetbbs.install
+
+# Tarballs built from FAT source trees lose the +x bit on these.
+for w in run_upgrade.sh run_restore.sh; do
+    if [[ -f "$INSTALL_DIR/deploy/$w" ]]; then
+        chmod 0755 "$INSTALL_DIR/deploy/$w"
+    fi
+done
+
+# ─── terminal image gallery viewer ─────────────────────────────────────────────
+# Placed at the install ROOT (not under version control there — update.sh's
+# rsync has no source-tree entry at this exact path, so it's never touched
+# by an update) rather than a real Linux home dir: SERVICE_USER is a system
+# account (`useradd -r`) with no real home, just $INSTALL_DIR as its $HOME
+# field. Callers never get a real shell — this only becomes reachable once
+# a sysop wires it up as a menu hotkey (action_type=exec), which the
+# "Add sample items" button on Admin -> BBS Menus now also does automatically.
+GALLERY_SCRIPT_SRC="$SOURCE_DIR/deploy/anet-gallery.sh"
+GALLERY_SCRIPT_DST="$INSTALL_DIR/anet-gallery.sh"
+if [[ -f "$GALLERY_SCRIPT_SRC" ]]; then
+    sed "s|__INSTALL_DIR__|$INSTALL_DIR|g" "$GALLERY_SCRIPT_SRC" > "$GALLERY_SCRIPT_DST"
+    chmod 0755 "$GALLERY_SCRIPT_DST"
+    chown "$SERVICE_USER":"$SERVICE_USER" "$GALLERY_SCRIPT_DST" 2>/dev/null || true
+    ok "Terminal gallery viewer installed: $GALLERY_SCRIPT_DST"
+else
+    warn "deploy/anet-gallery.sh not found — skipping terminal gallery viewer."
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# STEP 9: NGINX & SSL
+# ═══════════════════════════════════════════════════════════════════════════════
+step "Step 9/9: Configuring nginx & SSL"
+
+if [[ "$ENABLE_NGINX" == "y" ]] && [[ "${STATUS[nginx_pkg]:-}" == "ok" || -x /usr/sbin/nginx ]]; then
+    NGINX_AVAIL="/etc/nginx/sites-available/anetbbs"
+    NGINX_ENABLED="/etc/nginx/sites-enabled/anetbbs"
+
+    mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled
+    if ! grep -q "sites-enabled" /etc/nginx/nginx.conf 2>/dev/null; then
+        sed -i '/http {/a \    include /etc/nginx/sites-enabled/*;' /etc/nginx/nginx.conf 2>/dev/null || true
+    fi
+
+    # Always start with an HTTP-only config — even if SSL is requested.
+    # The deploy/anetbbs-nginx.conf.template references
+    # /etc/letsencrypt/live/<domain>/fullchain.pem which doesn't exist
+    # yet on a fresh install, so writing the SSL template first makes
+    # `nginx -t` fail and certbot can't run because nginx is broken.
+    # Write HTTP-only first, then `certbot --nginx` (below) auto-edits
+    # this same file to add the HTTPS server block + redirect using the
+    # cert it provisions.
+    cat > "$NGINX_AVAIL" << NGINXEOF
+# ANetBBS — nginx reverse proxy (HTTP)
+# Generated by install.sh on $(date)
+
+server {
+    listen 80;
+    server_name ${DOMAIN};
+
+    # Accept uploads up to the BBS's UPLOAD_MAX_SIZE (100MB) plus headroom.
+    client_max_body_size 110m;
+
+    proxy_set_header Host              \$host;
+    proxy_set_header X-Real-IP         \$remote_addr;
+    proxy_set_header X-Forwarded-For   \$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \$scheme;
+
+    location / {
+        proxy_pass http://127.0.0.1:${WEB_PORT};
+        proxy_read_timeout 120s;
+    }
+
+    location /socket.io/ {
+        proxy_pass         http://127.0.0.1:${WEB_PORT}/socket.io/;
+        proxy_http_version 1.1;
+        proxy_set_header   Upgrade    \$http_upgrade;
+        proxy_set_header   Connection "upgrade";
+        proxy_read_timeout 86400s;
+    }
+
+    # MRC Bridge WebSocket — gated by Flask auth_request so unauthenticated
+    # browsers can't open the upstream WS even if they know the URL.
+    location = /mrc-auth-check {
+        internal;
+        proxy_pass http://127.0.0.1:${WEB_PORT}/mrc/auth-check;
+        proxy_pass_request_body off;
+        proxy_set_header Content-Length "";
+        proxy_set_header X-Original-URI \$request_uri;
+        proxy_set_header Cookie \$http_cookie;
+    }
+
+    location /mrcws {
+        auth_request /mrc-auth-check;
+        proxy_pass         http://127.0.0.1:${MRC_BRIDGE_PORT_DEFAULT}/ws;
+        proxy_http_version 1.1;
+        proxy_set_header   Upgrade    \$http_upgrade;
+        proxy_set_header   Connection "upgrade";
+        proxy_read_timeout 86400s;
+    }
+
+    # Static files served directly by nginx for performance.
+    # max-age=86400 (1 day) intentionally omits 'immutable': static files
+    # change between BBS upgrades, so browsers must re-fetch after an update.
+    location /static/ {
+        alias ${INSTALL_DIR}/anetbbs/static/;
+        add_header Cache-Control "public, max-age=86400";
+    }
+}
+NGINXEOF
+
+    ln -sf "$NGINX_AVAIL" "$NGINX_ENABLED" 2>/dev/null || true
+    rm -f /etc/nginx/sites-enabled/default 2>/dev/null || true
+
+    # SELinux (Fedora/RHEL/CentOS default): nginx's proxy_pass to backend
+    # ports is blocked by policy unless httpd_can_network_connect is on --
+    # confirmed live on a fresh Fedora install: nginx's own error log showed
+    # "connect() to 127.0.0.1:5000 failed (13: Permission denied)" for
+    # EVERY proxied backend (the main app AND the MRC bridge), even though
+    # nginx itself started cleanly and `nginx -t` passed. Debian/Ubuntu
+    # don't have SELinux at all, so this only ever fires where it's
+    # actually needed -- getenforce simply doesn't exist there.
+    if command -v getenforce &>/dev/null && [[ "$(getenforce 2>/dev/null)" == "Enforcing" ]]; then
+        if command -v setsebool &>/dev/null; then
+            if setsebool -P httpd_can_network_connect 1 2>/dev/null; then
+                ok "SELinux: httpd_can_network_connect enabled (nginx can now reach the app/MRC bridge)"
+            else
+                warn "SELinux is enforcing but 'setsebool -P httpd_can_network_connect 1' failed — nginx will NOT be able to reach the app. Run it manually (as root) and restart nginx."
+            fi
+        else
+            warn "SELinux is enforcing but setsebool isn't installed — nginx will NOT be able to reach the app until you: sudo dnf install policycoreutils-python-utils && sudo setsebool -P httpd_can_network_connect 1"
+        fi
+    fi
+
+    if nginx -t 2>/dev/null; then
+        systemctl enable nginx 2>/dev/null || true
+        systemctl restart nginx 2>/dev/null || true
+        ok "nginx configured and running"
+        STATUS[nginx]="ok"
+    else
+        bad "nginx config test failed — check $NGINX_AVAIL"
+        STATUS[nginx]="fail"
+        nginx -t 2>&1 | while read -r line; do
+            echo -e "    ${DIM}$line${NC}"
+        done
+    fi
+
+    if [[ "$ENABLE_SSL" == "y" ]] && command -v certbot &>/dev/null; then
+        # Let's Encrypt verifies the domain by fetching
+        #   http://$DOMAIN/.well-known/acme-challenge/<token>
+        # which means port 80 (and 443 for the redirect) MUST be reachable
+        # from the public internet. Behind a home router this almost always
+        # means port-forwarding 80/443 → this box's LAN IP. Most first-time
+        # certbot failures here are simply "ports not forwarded yet" — pause
+        # and let the sysop confirm before we burn a Let's Encrypt rate-limit
+        # slot on an attempt that's guaranteed to fail.
+        if ! $USE_DEFAULTS; then
+            echo ""
+            echo -e "${BOLD}  ── Let's Encrypt readiness check ──${NC}"
+            echo -e "  About to request an SSL cert for: ${BOLD}$DOMAIN${NC}"
+            echo ""
+            echo "  Let's Encrypt will connect from the public internet to:"
+            echo "    http://$DOMAIN/.well-known/acme-challenge/..."
+            echo ""
+            echo "  For this to succeed, ALL of the following must be true:"
+            echo "    1. DNS for $DOMAIN points at your public IP"
+            echo -e "    2. Your router forwards ${BOLD}port 80${NC} → this box"
+            echo -e "    3. Your router forwards ${BOLD}port 443${NC} → this box"
+            echo "    4. No upstream firewall (ISP, cloud SG) blocks 80/443"
+            echo ""
+            echo "  Each failed cert request costs a Let's Encrypt rate-limit"
+            echo "  slot (5/hour for a given domain). Verify your forwarding"
+            echo "  is in place before continuing."
+            echo ""
+            read -rp "  Ports forwarded and ready? Press Enter to continue, or Ctrl+C to abort. "
+        fi
+
+        info "Obtaining SSL certificate for $DOMAIN ..."
+        if certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos \
+             -m "admin@${DOMAIN}" --redirect 2>/dev/null; then
+            ok "SSL certificate obtained"
+            STATUS[ssl]="ok"
+
+            # Wire up FTPS cert access + a certbot renewal hook, same as
+            # update.sh's own self-heal block -- previously ONLY update.sh
+            # did this, so a sysop who set FTP_TLS_CERTFILE right after a
+            # fresh install (without ever running update.sh) would have
+            # working FTPS today that silently breaks at the FIRST cert
+            # renewal (~90 days out): certbot resets
+            # /etc/letsencrypt/archive to 0700 root:root on every renewal,
+            # which the anetbbs service user then can't read. Pre-staging
+            # this now means FTPS works correctly whenever the sysop later
+            # sets FTP_TLS_CERTFILE, with no separate update.sh run needed.
+            info "Wiring up FTPS cert access (ssl-cert group + renewal hook)..."
+            if ! getent group ssl-cert >/dev/null 2>&1; then
+                groupadd --system ssl-cert 2>/dev/null && \
+                    info "  created ssl-cert system group" || \
+                    warn "  could not create ssl-cert group"
+            fi
+            if ! id -nG "$SERVICE_USER" 2>/dev/null | tr ' ' '\n' | grep -qx ssl-cert; then
+                if usermod -aG ssl-cert "$SERVICE_USER" 2>/dev/null; then
+                    ok "  added $SERVICE_USER to ssl-cert group"
+                else
+                    warn "  could not add $SERVICE_USER to ssl-cert"
+                fi
+            fi
+            if [[ -d /etc/letsencrypt/archive ]]; then
+                chgrp -R ssl-cert /etc/letsencrypt/archive /etc/letsencrypt/live 2>/dev/null || true
+                chmod g+rX /etc/letsencrypt/archive /etc/letsencrypt/live 2>/dev/null || true
+                find /etc/letsencrypt/archive -name 'privkey*.pem' -exec chmod 640 {} \; 2>/dev/null || true
+                find /etc/letsencrypt/archive -name '*.pem' ! -name 'privkey*' -exec chmod 644 {} \; 2>/dev/null || true
+                ok "  /etc/letsencrypt perms set for ssl-cert group access"
+            fi
+            HOOK_DIR=/etc/letsencrypt/renewal-hooks/deploy
+            HOOK=$HOOK_DIR/anetbbs-ssl-cert-perms.sh
+            if [[ -d /etc/letsencrypt ]]; then
+                mkdir -p "$HOOK_DIR" 2>/dev/null || true
+                cat > "$HOOK" << 'HOOKEOF'
+#!/bin/bash
+# Installed by anetbbs install.sh.
+#
+# Certbot resets /etc/letsencrypt/archive perms to 0700 root:root on
+# every cert renewal, which silently breaks anetbbs FTPS (and any
+# other non-root service reading the cert). This deploy-hook fires
+# after each successful renewal and restores ssl-cert group access.
+chgrp -R ssl-cert /etc/letsencrypt/archive /etc/letsencrypt/live 2>/dev/null || true
+chmod g+rX /etc/letsencrypt/archive /etc/letsencrypt/live 2>/dev/null || true
+find /etc/letsencrypt/archive -name 'privkey*.pem' -exec chmod 640 {} \; 2>/dev/null || true
+find /etc/letsencrypt/archive -name '*.pem' ! -name 'privkey*' -exec chmod 644 {} \; 2>/dev/null || true
+HOOKEOF
+                chmod 0755 "$HOOK"
+                ok "  certbot renewal hook installed ($HOOK)"
+            fi
+            # anetbbs.service was already written earlier in Step 8 --
+            # patch it for SupplementaryGroups=ssl-cert the same way
+            # update.sh patches an existing unit, rather than duplicating
+            # the whole heredoc here. Harmless no-op if telnet/ssh/rlogin
+            # (and therefore this unit) weren't enabled.
+            ANETBBS_UNIT_FOR_SSL=/etc/systemd/system/anetbbs.service
+            if [[ -f "$ANETBBS_UNIT_FOR_SSL" ]] && \
+               ! grep -q '^SupplementaryGroups=.*ssl-cert' "$ANETBBS_UNIT_FOR_SSL"; then
+                if grep -q '^EnvironmentFile=' "$ANETBBS_UNIT_FOR_SSL"; then
+                    sed -i.bak '/^EnvironmentFile=/a SupplementaryGroups=ssl-cert' "$ANETBBS_UNIT_FOR_SSL"
+                else
+                    sed -i.bak '/^ExecStart=/i SupplementaryGroups=ssl-cert' "$ANETBBS_UNIT_FOR_SSL"
+                fi
+                systemctl daemon-reload 2>/dev/null || true
+                systemctl restart anetbbs 2>/dev/null || true
+                ok "  anetbbs.service patched (FTPS cert will be readable)"
+            fi
+        else
+            warn "certbot failed. Common causes:"
+            warn "  • Port 80 not forwarded from your router to this box"
+            warn "  • DNS for $DOMAIN doesn't resolve to your public IP yet"
+            warn "  • An ISP/cloud firewall is blocking inbound 80"
+            warn "Once you've fixed the issue, retry with:"
+            warn "  sudo certbot --nginx -d $DOMAIN"
+            STATUS[ssl]="fail"
+        fi
+    fi
+else
+    skip "nginx not enabled or not installed"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# HEALTH CHECK
+# ═══════════════════════════════════════════════════════════════════════════════
+step "Running health checks"
+
+sleep 2
+
+HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 "http://127.0.0.1:${WEB_PORT}/" 2>/dev/null || echo "000")
+if [[ "$HTTP_CODE" -ge 200 ]] && [[ "$HTTP_CODE" -lt 500 ]]; then
+    ok "Web server responding on port $WEB_PORT (HTTP $HTTP_CODE)"
+    STATUS[web_health]="ok"
+else
+    bad "Web server not responding on port $WEB_PORT (HTTP $HTTP_CODE)"
+    STATUS[web_health]="fail"
+fi
+
+# ─── MRC web-proxy verification ────────────────────────────────────────────
+# Same check update.sh runs on every subsequent update (see its own
+# comment for the full "new sysops report web MRC broken, terminal MRC
+# fine" backstory) — run here too so a fresh install gets this feedback
+# immediately instead of only on the next update.sh run. "behind"/"test"
+# mode sysops are expected to fail the nginx half right after a fresh
+# install (they haven't set up their own proxy yet) — that's fine, this
+# is diagnostic, not a hard failure; the printed mode-specific notes
+# further below already cover what to do next.
+if [[ "$ENABLE_MRC" == "y" ]]; then
+    MRC_WS_LOCAL="http://127.0.0.1:${MRC_BRIDGE_PORT_DEFAULT}/ws"
+    # Confirmed live (twice, see update.sh's copy of this check for the
+    # full story): (1) a probe right after the service starts can race
+    # its own startup, so this retries briefly, matching the /healthz
+    # probe above. (2) A real WS-upgrade attempt is the wrong probe
+    # shape -- once the server answers 101, curl has no reason to close
+    # the now-raw connection on its own, so it blocks until --max-time
+    # kills it, meaning curl's exit code comes back as a timeout on
+    # every SUCCESS too, not just failures. No Upgrade headers needed
+    # (any HTTP response at all, even a 400 rejecting a non-upgrade GET,
+    # proves the bridge's HTTP layer is alive) and read the captured
+    # status code directly instead of trusting curl's exit status.
+    MRC_WS_OK=false
+    for i in 1 2 3 4 5; do
+        MRC_HTTP_CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 \
+            "$MRC_WS_LOCAL" 2>/dev/null || echo "000")
+        if [[ "$MRC_HTTP_CODE" != "000" ]]; then
+            MRC_WS_OK=true
+            break
+        fi
+        sleep 2
+    done
+    if [[ "$MRC_WS_OK" == "true" ]]; then
+        ok "MRC bridge answering locally on port $MRC_BRIDGE_PORT_DEFAULT (HTTP $MRC_HTTP_CODE)"
+    else
+        warn "MRC bridge is NOT answering on 127.0.0.1:${MRC_BRIDGE_PORT_DEFAULT}/ws (after 5 retries over ~15s) — check 'systemctl status anetbbs-mrc-bridge' and its journalctl output."
+    fi
+
+    if [[ "$ENABLE_NGINX" == "y" ]]; then
+        if [[ -f "/etc/nginx/sites-available/anetbbs" ]] && grep -q "location /mrcws" "/etc/nginx/sites-available/anetbbs" 2>/dev/null; then
+            ok "nginx /mrcws proxy configured"
+        else
+            warn "nginx is enabled but no /mrcws location block was found — web MRC chat will not work. This shouldn't happen from a normal install; check /etc/nginx/sites-available/anetbbs."
+        fi
+    fi
+fi
+
+# ─── nginx CVE check ──────────────────────────────────────────────────────────
+# CVE-2026-42945 ("NGINX Rift") is a confirmed, real, CVSS 9.2 unauthenticated
+# heap-overflow RCE affecting nginx 0.6.27 through 1.30.0, patched upstream in
+# 1.30.1/1.31.0 (verified against NVD/vendor advisories, not guessed).
+#
+# The actual trigger is narrow: a `rewrite` directive using an unnamed PCRE
+# capture (e.g. $1) with a literal `?` in the replacement string, followed by
+# another rewrite/if/set directive. That precise pattern isn't something a
+# simple grep can reliably confirm or rule out (multi-line rules, regex
+# capture groups, directive adjacency across included files) — an earlier
+# version of this check tried a coarse "config contains both 'rewrite' and
+# 'set' somewhere" heuristic and used a negative result to tell the sysop
+# they were "not currently exploitable". That's both a false-positive risk
+# (unrelated rewrite/set elsewhere in the config) and, worse, a false-negative
+# risk (a vulnerable rewrite→rewrite or rewrite→if chain needs no 'set'
+# directive at all, so it would have been wrongly told it was safe). Given
+# this is a 9.2 unauthenticated RCE, a wrong "you're fine" is far worse than
+# an unconditional "patch now" — so this no longer tries to assess
+# exploitability, only the version range.
+if [[ "$ENABLE_NGINX" == "y" ]] && command -v nginx &>/dev/null; then
+    NGINX_VER=$(nginx -v 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+    if [[ -n "$NGINX_VER" ]]; then
+        # Decompose for numeric comparison
+        IFS='.' read -r NG_MAJ NG_MIN NG_PAT <<<"$NGINX_VER"
+        # In vulnerable range if (>0.6) OR (==0.6 AND patch>=27), AND (<1.30) OR (==1.30 AND patch==0)
+        vulnerable=0
+        if (( NG_MAJ == 0 && NG_MIN == 6 && NG_PAT >= 27 )); then vulnerable=1; fi
+        if (( NG_MAJ == 0 && NG_MIN > 6 )); then vulnerable=1; fi
+        if (( NG_MAJ == 1 && NG_MIN < 30 )); then vulnerable=1; fi
+        if (( NG_MAJ == 1 && NG_MIN == 30 && NG_PAT == 0 )); then vulnerable=1; fi
+
+        if (( vulnerable )); then
+            bad "nginx $NGINX_VER is in the CVE-2026-42945 range (0.6.27-1.30.0)"
+            bad "— unauthenticated RCE, CVSS 9.2. Upgrade nginx immediately:"
+            bad "  sudo apt update && sudo apt upgrade nginx"
+            bad "(need 1.30.1+ or 1.31.0+ mainline)."
+            STATUS[nginx_cve]="fail"
+        else
+            ok "nginx $NGINX_VER is outside the CVE-2026-42945 range"
+            STATUS[nginx_cve]="ok"
+        fi
+    fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# FINAL SUMMARY
+# ═══════════════════════════════════════════════════════════════════════════════
+echo ""
+echo ""
+echo -e "${BOLD}${CYAN}"
+echo "╔══════════════════════════════════════════════════════════════╗"
+echo "║              Installation Complete!                          ║"
+echo "╚══════════════════════════════════════════════════════════════╝"
+echo -e "${NC}"
+
+show_status() {
+    local key="$1" label="$2"
+    if [[ "${STATUS[$key]:-}" == "ok" ]]; then
+        echo -e "  ${GREEN}✅${NC} $label"
+    elif [[ "${STATUS[$key]:-}" == "fail" ]]; then
+        echo -e "  ${RED}❌${NC} $label"
+    else
+        echo -e "  ${DIM}⏭  $label (skipped)${NC}"
+    fi
+}
+
+echo -e "${BOLD}  Mode:${NC} ${INSTALL_MODE}"
+echo -e "${BOLD}  Components:${NC}"
+show_status "required_pkgs"   "System packages"
+show_status "files"           "Application files"
+show_status "python"          "Python environment"
+show_status "config"          "Configuration (.env)"
+show_status "anetbbs-web"       "Web server (gunicorn)"
+if [[ "$ENABLE_TELNET" == "y" || "$ENABLE_SSH" == "y" ]]; then
+    proto_label=""
+    [[ "$ENABLE_TELNET" == "y" ]] && proto_label+="telnet "
+    [[ "$ENABLE_SSH" == "y" ]]    && proto_label+="ssh "
+    show_status "anetbbs"        "Terminal protocols (${proto_label% })"
+fi
+[[ "$ENABLE_FINGER" == "y" ]] && show_status "anetbbs-finger" "Finger server"
+[[ "$INSTALL_SIXEL" == "y" ]] && show_status "terminal_images" "Terminal image viewer (chafa/img2sixel)"
+show_status "anetbbs-mrc-bridge" "MRC bridge service"
+[[ "$ENABLE_NGINX" == "y" ]]  && show_status "nginx"          "nginx reverse proxy"
+[[ "$ENABLE_SSL" == "y" ]]    && show_status "ssl"            "SSL certificate"
+show_status "web_health"      "Web health check"
+if [[ "${STATUS[nginx_cve]:-}" == "fail" ]]; then
+    echo -e "  ${RED}❌${NC} nginx CVE-2026-42945 — version is vulnerable (0.6.27-1.30.0): patch nginx NOW"
+elif [[ "${STATUS[nginx_cve]:-}" == "ok" ]]; then
+    echo -e "  ${GREEN}✅${NC} nginx CVE-2026-42945 check (version not in vulnerable range)"
+fi
+
+if [[ "$INSTALL_MODE" == "test" ]]; then
+    echo ""
+    echo -e "${BOLD}${YELLOW}  Note: This is a TEST install (localhost-only web).${NC}"
+    echo -e "  ${DIM}- gunicorn binds 127.0.0.1:${WEB_PORT} — not reachable from your LAN${NC}"
+    echo -e "  ${DIM}- Access from another machine via SSH tunnel:${NC}"
+    echo -e "  ${DIM}    ssh -L ${WEB_PORT}:localhost:${WEB_PORT} ${SERVICE_USER}@<this-box>${NC}"
+    echo -e "  ${DIM}    then open http://localhost:${WEB_PORT}/ in your local browser${NC}"
+    [[ "$ENABLE_MSP"    != "y" ]] && echo -e "  ${DIM}- Inter-BBS IM (MSP/SYSTAT) disabled — re-enable in .env once you have a public IP${NC}"
+    [[ "$ENABLE_FINGER" != "y" ]] && echo -e "  ${DIM}- Finger disabled — re-enable in .env + restart anetbbs-finger when going public${NC}"
+    [[ "$ENABLE_BINKP"  != "y" ]] && echo -e "  ${DIM}- BinkP listener disabled — outbound netmail/echomail still works, inbound from FidoNet doesn't${NC}"
+    if [[ "$ENABLE_MRC" == "y" ]]; then
+        echo -e "  ${DIM}- Web MRC chat will NOT connect in this mode: /mrcws is proxied${NC}"
+        echo -e "  ${DIM}  by nginx only, and this mode has no nginx. Terminal MRC (SSH/telnet)${NC}"
+        echo -e "  ${DIM}  is unaffected. Fixed by going to production mode, or by manually${NC}"
+        echo -e "  ${DIM}  proxying /mrcws to 127.0.0.1:${MRC_BRIDGE_PORT_DEFAULT} yourself.${NC}"
+    fi
+    echo -e "  ${DIM}- To go production later: re-run install.sh with mode=production${NC}"
+elif [[ "$INSTALL_MODE" == "behind" ]]; then
+    echo ""
+    echo -e "${BOLD}${YELLOW}  Note: Behind-another-server install.${NC}"
+    echo -e "  ${DIM}- gunicorn binds 0.0.0.0:${WEB_PORT} — reachable from this box's IP${NC}"
+    echo -e "  ${DIM}- Add a server block to your EXISTING nginx (or apache) pointing${NC}"
+    echo -e "  ${DIM}  bbs.<your-domain> at http://127.0.0.1:${WEB_PORT}/ . Example nginx:${NC}"
+    echo -e "  ${DIM}    server { server_name bbs.example.com; listen 80;${NC}"
+    echo -e "  ${DIM}      location / { proxy_pass http://127.0.0.1:${WEB_PORT};${NC}"
+    echo -e "  ${DIM}        proxy_http_version 1.1; proxy_set_header Upgrade \$http_upgrade;${NC}"
+    echo -e "  ${DIM}        proxy_set_header Connection \"upgrade\"; proxy_read_timeout 86400; }${NC}"
+    echo -e "  ${DIM}    }${NC}"
+    echo -e "  ${DIM}- Then run certbot --nginx -d bbs.example.com on YOUR nginx for HTTPS${NC}"
+    if [[ "$ENABLE_MRC" == "y" ]]; then
+        echo -e "  ${DIM}- Web MRC chat needs two MORE locations (/mrc-auth-check,${NC}"
+        echo -e "  ${DIM}  /mrcws) proxying to the bridge on port ${MRC_BRIDGE_PORT_DEFAULT} —${NC}"
+        echo -e "  ${DIM}  the example above alone does NOT cover it. Copy those blocks${NC}"
+        echo -e "  ${DIM}  from deploy/anetbbs-nginx.conf.template into your server block.${NC}"
+    fi
+fi
+
+# Real gap found in a full install/update re-verify audit: FTP and
+# PETSCII40/80 are off by default and not wizard-prompted (sysop
+# enables them later by editing .env, same pattern as rlogin) -- but
+# unlike every wizard-prompted transport, this installer never opens
+# their ports in UFW and never told the sysop they'd need to. Shown
+# unconditionally since these can be turned on at any time regardless
+# of install mode.
+echo ""
+echo -e "  ${DIM}FTP and PETSCII40/80 are off by default (enable in .env, restart${NC}"
+echo -e "  ${DIM}anetbbs.service). If you turn them on, also open their firewall${NC}"
+echo -e "  ${DIM}ports yourself: FTP needs 21/tcp + 40000-40050/tcp (passive data);${NC}"
+echo -e "  ${DIM}PETSCII40/80 need 6400/tcp and 6401/tcp respectively.${NC}"
+
+echo ""
+echo -e "${BOLD}  Access URLs:${NC}"
+if [[ "$ENABLE_NGINX" == "y" ]] && [[ "${STATUS[nginx]:-}" == "ok" ]]; then
+    if [[ "$ENABLE_SSL" == "y" ]] && [[ "${STATUS[ssl]:-}" == "ok" ]]; then
+        echo -e "  Web:     ${CYAN}https://${DOMAIN}${NC}"
+    else
+        echo -e "  Web:     ${CYAN}http://${DOMAIN}${NC}"
+    fi
+elif [[ "$INSTALL_MODE" == "test" ]]; then
+    echo -e "  Web:     ${CYAN}http://localhost:${WEB_PORT}${NC} (from this box only — SSH tunnel for remote)"
+else
+    echo -e "  Web:     ${CYAN}http://${DOMAIN}:${WEB_PORT}${NC}"
+fi
+[[ "$ENABLE_TELNET" == "y" ]] && echo -e "  Telnet:  ${CYAN}telnet ${DOMAIN} ${TELNET_PORT}${NC}"
+[[ "$ENABLE_SSH" == "y" ]]    && echo -e "  SSH:     ${CYAN}ssh -p ${SSH_PORT} ${DOMAIN}${NC}"
+
+echo ""
+echo -e "${BOLD}  Admin Login:${NC}"
+echo -e "  Username:  ${CYAN}${ADMIN_USER}${NC}"
+if $ADMIN_PRESERVED; then
+    echo -e "  Password:  ${DIM}(unchanged — an existing account with this username was preserved)${NC}"
+elif $ADMIN_PASS_GENERATED; then
+    echo -e "  Password:  ${CYAN}${ADMIN_PASS}${NC}  ${YELLOW}(save this — it won't be shown again!)${NC}"
+else
+    echo -e "  Password:  ${DIM}(the password you entered)${NC}"
+fi
+
+echo ""
+echo -e "${BOLD}  File Locations:${NC}"
+echo -e "  Install dir:    ${DIM}${INSTALL_DIR}${NC}"
+echo -e "  Configuration:  ${DIM}${INSTALL_DIR}/.env${NC}"
+echo -e "  Database:       ${DIM}${INSTALL_DIR}/data/anetbbs.db${NC}"
+echo -e "  Logs:           ${DIM}${INSTALL_DIR}/logs/${NC}"
+
+echo ""
+echo -e "${BOLD}  Useful Commands:${NC}"
+echo -e "  ${DIM}sudo systemctl status anetbbs-web anetbbs anetbbs-mrc-bridge${NC}"
+echo -e "  ${DIM}sudo journalctl -u anetbbs-web -f${NC}"
+echo -e "  ${DIM}sudo bash ${INSTALL_DIR}/install.sh --uninstall${NC}"
+
+echo ""
+echo -e "${GREEN}${BOLD}  Your BBS is ready! Log in to the web admin panel to configure${NC}"
+echo -e "${GREEN}${BOLD}  message boards, games, echomail, themes, and more.${NC}"
+echo ""

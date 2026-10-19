@@ -1,0 +1,164 @@
+{% extends "base.html" %}
+{% block title %}Poll Logs — {{ config.BBS_NAME }}{% endblock %}
+
+{% block content %}
+<div class="bbs-header">
+    <h1><i class="bi bi-journal-text"></i> Poll History</h1>
+</div>
+
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <a href="{{ url_for('echomail_admin.dashboard') }}" class="btn btn-primary btn-sm">
+        <i class="bi bi-arrow-left"></i> Dashboard
+    </a>
+    <form method="get" class="d-flex gap-2">
+        <select name="network_id" class="form-control form-control-sm" style="width:200px;">
+            <option value="">All Networks</option>
+            {% for net in all_networks %}
+            <option value="{{ net.id }}" {% if network_filter == net.id %}selected{% endif %}>{{ net.name }}</option>
+            {% endfor %}
+        </select>
+        <select name="node_id" class="form-control form-control-sm" style="width:200px;">
+            <option value="">All Nodes</option>
+            {% for n in all_nodes %}
+            <option value="{{ n.id }}" {% if node_filter == n.id %}selected{% endif %}>{{ n.name }}</option>
+            {% endfor %}
+        </select>
+        <button type="submit" class="btn btn-primary btn-sm">Filter</button>
+    </form>
+</div>
+
+{% if logs %}
+<div class="card">
+    <div class="card-body p-0">
+        <table class="table table-striped mb-0">
+            <thead>
+                <tr>
+                    <th>Network</th><th>Node</th><th>Started</th><th>Completed</th>
+                    <th>Type</th><th>Status</th><th>Sent</th><th>Received</th><th>Error</th><th></th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for log in logs %}
+                <tr data-status="{{ log.status }}" {% if log.status == 'running' %}class="table-warning"{% endif %}>
+                    <td>{{ log.network.name }}</td>
+                    <td>{{ log.node.name if log.node else '—' }}</td>
+                    <td style="font-size:0.8rem; white-space:nowrap;">{{ log.started_at|eastern('%Y-%m-%d %H:%M:%S') }}</td>
+                    <td style="font-size:0.8rem; white-space:nowrap;">
+                        {{ log.completed_at|eastern('%H:%M:%S', '—') }}
+                    </td>
+                    <td>{{ log.poll_type }}</td>
+                    <td>
+                        {% if log.status == 'success' %}<span style="color:#00ff00;">✓ success</span>
+                        {% elif log.status == 'error' %}<span style="color:#ff0000;">✗ error</span>
+                        {% elif log.status == 'running' %}
+                            <span style="color:#ffff00; font-weight:bold;">🔄 in progress</span>
+                            <span class="live-elapsed small text-muted" data-started="{{ log.started_at.isoformat() }}Z"></span>
+                        {% else %}<span style="color:#ffff00;">~ {{ log.status }}</span>{% endif %}
+                    </td>
+                    <td>{{ log.messages_sent or 0 }}</td>
+                    <td>{{ log.messages_received or 0 }}</td>
+                    <td style="font-size:0.8rem; color:#ff6600; max-width:300px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;"
+                        title="{{ log.error_message or '' }}">
+                        {{ log.error_message or '' }}
+                    </td>
+                    <td style="white-space:nowrap;">
+                        {% if log.transcript %}
+                        <a href="{{ url_for('echomail_admin.poll_log_transcript', log_id=log.id) }}"
+                           class="btn btn-sm btn-outline-secondary"
+                           title="{{ 'Partial transcript — poll still in progress' if log.status == 'running' else 'Full BinkP session transcript' }}">
+                            <i class="bi bi-file-text"></i>
+                            {{ 'Transcript (partial)' if log.status == 'running' else 'Transcript' }}
+                        </a>
+                        {% elif log.status == 'running' %}
+                        <a href="{{ url_for('echomail_admin.poll_log_transcript', log_id=log.id) }}"
+                           class="btn btn-sm btn-outline-secondary" title="No transcript captured yet">
+                            <i class="bi bi-file-text"></i> Transcript
+                        </a>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+{% if pagination.pages > 1 %}
+<nav class="mt-3">
+    <ul class="pagination justify-content-center">
+        {% if pagination.has_prev %}
+        <li class="page-item">
+            <a class="page-link" href="{{ url_for('echomail_admin.logs', page=pagination.prev_num, network_id=network_filter or '', node_id=node_filter or '') }}">‹ Prev</a>
+        </li>
+        {% endif %}
+        {% for p in pagination.iter_pages() %}
+            {% if p %}
+            <li class="page-item {{ 'active' if p == pagination.page else '' }}">
+                <a class="page-link" href="{{ url_for('echomail_admin.logs', page=p, network_id=network_filter or '', node_id=node_filter or '') }}">{{ p }}</a>
+            </li>
+            {% else %}
+            <li class="page-item disabled"><span class="page-link">…</span></li>
+            {% endif %}
+        {% endfor %}
+        {% if pagination.has_next %}
+        <li class="page-item">
+            <a class="page-link" href="{{ url_for('echomail_admin.logs', page=pagination.next_num, network_id=network_filter or '', node_id=node_filter or '') }}">Next ›</a>
+        </li>
+        {% endif %}
+    </ul>
+</nav>
+{% endif %}
+
+{% else %}
+<div class="card">
+    <div class="card-body text-center p-4">
+        <i class="bi bi-journal-text" style="font-size:3rem;"></i>
+        <p class="mt-3">No poll logs yet.</p>
+    </div>
+</div>
+{% endif %}
+
+<script>
+// Live "started Xs ago" ticker for in-progress polls, plus a periodic
+// re-fetch of just this table (no full page reload/scroll-jump) while
+// any poll is still running -- matches the fetch()+setInterval pattern
+// already used by the Service Control Center (admin/control.html),
+// deliberately not introducing SocketIO just for this.
+(function () {
+    function tickElapsed() {
+        document.querySelectorAll('.live-elapsed').forEach(function (el) {
+            var started = new Date(el.dataset.started);
+            var secs = Math.max(0, Math.floor((Date.now() - started.getTime()) / 1000));
+            var mins = Math.floor(secs / 60);
+            el.textContent = mins > 0 ? ('(' + mins + 'm ' + (secs % 60) + 's ago)')
+                                       : ('(' + secs + 's ago)');
+        });
+    }
+    tickElapsed();
+    setInterval(tickElapsed, 1000);
+
+    function hasRunningPoll() {
+        return !!document.querySelector('tr[data-status="running"]');
+    }
+
+    function refreshTable() {
+        if (!hasRunningPoll()) return;
+        fetch(window.location.href, { headers: { 'X-Requested-With': 'XMLHttpRequest' } })
+            .then(function (r) { return r.text(); })
+            .then(function (html) {
+                var doc = new DOMParser().parseFromString(html, 'text/html');
+                var newTbody = doc.querySelector('table tbody');
+                var curTbody = document.querySelector('table tbody');
+                if (newTbody && curTbody) {
+                    curTbody.innerHTML = newTbody.innerHTML;
+                    tickElapsed();
+                }
+            })
+            .catch(function () { /* best-effort; try again next interval */ });
+    }
+    if (hasRunningPoll()) {
+        setInterval(refreshTable, 5000);
+    }
+})();
+</script>
+{% endblock %}

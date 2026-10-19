@@ -1,0 +1,69 @@
+# .github/workflows/pip-audit.yml
+#
+# requirements.txt pins everything with `>=` minimums, so a fresh
+# `pip install -e .` always picks up the latest compatible release --
+# but nothing was actually checking whether "latest compatible" is also
+# "free of known CVEs." This workflow closes that gap.
+#
+# Audits requirements.txt directly (`pip-audit -r requirements.txt`)
+# rather than installing the app and auditing the resolved environment.
+# The first version of this workflow did the latter (`pip install -e .`
+# then bare `pip-audit`) and always failed: pip-audit audits every
+# installed distribution, including the local editable `anetbbs`
+# package itself -- which isn't published to PyPI, so pip-audit can't
+# look up version/vulnerability info for it and errors out under
+# --strict ("Dependency not found on PyPI and could not be audited").
+# Auditing the requirements file directly sidesteps this entirely: pip-
+# audit resolves it in its own isolated environment, no local install
+# needed at all.
+#
+# Runs weekly (catches a CVE published against an already-pinned
+# version, not just new PRs) and on any PR touching the dependency
+# manifest. Fails the job (visibly, in the Actions tab / PR checks) on
+# any known vulnerability -- does not auto-fix anything; a maintainer
+# decides how to respond (bump a minimum version, or in the rare case
+# of a false positive / no fix available yet, note why).
+#
+# Complementary to .github/dependabot.yml, which proactively opens PRs
+# for available version bumps -- this workflow is the "is anything
+# currently vulnerable" check, Dependabot is the "here's an update you
+# could take" proposal. Deliberately does NOT add `--upgrade` to
+# update.sh's own dependency step -- see the multi-hub-identity plan
+# file / release notes for why that's a separate, deliberate decision.
+
+name: pip-audit
+
+on:
+  schedule:
+    # Mondays 09:00 UTC -- arbitrary but consistent; not tied to any
+    # release cadence.
+    - cron: '0 9 * * 1'
+  push:
+    branches: [main]
+    paths:
+      - 'requirements.txt'
+      - '.github/workflows/pip-audit.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'requirements.txt'
+  workflow_dispatch: {}
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install pip-audit
+        run: |
+          python -m pip install --upgrade pip
+          pip install pip-audit
+
+      - name: Audit requirements.txt
+        run: pip-audit -r requirements.txt --strict

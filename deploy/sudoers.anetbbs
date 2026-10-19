@@ -1,0 +1,98 @@
+# /etc/sudoers.d/anetbbs
+#
+# NOPASSWD entries that let the gunicorn worker user run the
+# state-changing systemctl verbs (start / stop / restart) against the
+# anetbbs-* units — no full root shell. Read-only ops (status, show,
+# journalctl) do NOT need sudo and the panel calls them directly.
+#
+# Replace `__SERVICE_USER__` with whatever User= the anetbbs-web.service
+# unit runs as. The installer / update.sh re-writes this file on every
+# run so the user, paths, and unit names stay in sync.
+#
+# Install with:
+#   sudo cp deploy/sudoers.anetbbs /etc/sudoers.d/anetbbs
+#   sudo chmod 0440 /etc/sudoers.d/anetbbs
+#   sudo visudo -cf /etc/sudoers.d/anetbbs
+#
+# WHY BOTH /bin/systemctl AND /usr/bin/systemctl:
+# Ubuntu 18.04+ ships `/bin -> /usr/bin` as a symlink, but sudo
+# resolves commands through its OWN `secure_path` and compares the
+# resolved path *literally* against the sudoers rule (no symlink
+# following — security). On most Ubuntu boxes sudo resolves to
+# /usr/bin/systemctl; older / non-merged-/usr Debian boxes use
+# /bin/systemctl. Listing both makes the rule match regardless.
+#
+# Service tree (must match anetbbs/web/control.py::KNOWN_UNITS):
+#   anetbbs-web         gunicorn web + MSP + SYSTAT + federation
+#   anetbbs             unified terminal protocols (telnet/SSH/rlogin/FTP/LMTP)
+#   anetbbs-mrc-bridge  MRC chat bridge
+#   anetbbs-finger      RFC 1288 finger daemon
+#   anetbbs-binkp       BinkP/1.1 inbound echomail listener
+#
+# In-place upgrade wrapper. Strictly arg-validated inside the script
+# (version regex, sha256 regex, URL pattern). The path varies by
+# install location; install.sh / update.sh rewrite /etc/sudoers.d/anetbbs
+# at every run with the correct INSTALL_DIR substituted.
+#
+# We grant TWO invocation forms:
+#   1. Via `systemd-run --scope` — the auto-update path uses this so
+#      the wrapper runs in its own transient scope outside the
+#      anetbbs-web cgroup. Critical: without the scope, Step 3 of
+#      update.sh (which stops anetbbs-web) would kill the wrapper
+#      itself, halting the upgrade mid-flight.
+#   2. Direct invocation — kept for sysop / debugging use from a
+#      terminal session that isn't inside anetbbs-web's cgroup.
+Cmnd_Alias ANETBBS_UPGRADE = \
+    /usr/bin/systemd-run --scope --collect --quiet /opt/anetbbs/deploy/run_upgrade.sh *, \
+    /opt/anetbbs/deploy/run_upgrade.sh *
+
+# Restore helper — invoked by /admin/backups/ to copy a snapshot's
+# .env or DB back into place. Same path-rewrite from /opt/anetbbs/
+# happens via update.sh's sed.
+Cmnd_Alias ANETBBS_RESTORE = \
+    /opt/anetbbs/deploy/run_restore.sh *
+
+Cmnd_Alias ANETBBS_SYSCTL = \
+    /usr/bin/systemctl start  anetbbs, \
+    /usr/bin/systemctl stop   anetbbs, \
+    /usr/bin/systemctl restart anetbbs, \
+    /usr/bin/systemctl start  anetbbs-web, \
+    /usr/bin/systemctl stop   anetbbs-web, \
+    /usr/bin/systemctl restart anetbbs-web, \
+    /usr/bin/systemctl reload anetbbs-web, \
+    /usr/bin/systemctl start  anetbbs-mrc-bridge, \
+    /usr/bin/systemctl stop   anetbbs-mrc-bridge, \
+    /usr/bin/systemctl restart anetbbs-mrc-bridge, \
+    /usr/bin/systemctl start  anetbbs-finger, \
+    /usr/bin/systemctl stop   anetbbs-finger, \
+    /usr/bin/systemctl restart anetbbs-finger, \
+    /usr/bin/systemctl start  anetbbs-binkp, \
+    /usr/bin/systemctl stop   anetbbs-binkp, \
+    /usr/bin/systemctl restart anetbbs-binkp, \
+    /bin/systemctl start  anetbbs, \
+    /bin/systemctl stop   anetbbs, \
+    /bin/systemctl restart anetbbs, \
+    /bin/systemctl start  anetbbs-web, \
+    /bin/systemctl stop   anetbbs-web, \
+    /bin/systemctl restart anetbbs-web, \
+    /bin/systemctl reload anetbbs-web, \
+    /bin/systemctl start  anetbbs-mrc-bridge, \
+    /bin/systemctl stop   anetbbs-mrc-bridge, \
+    /bin/systemctl restart anetbbs-mrc-bridge, \
+    /bin/systemctl start  anetbbs-finger, \
+    /bin/systemctl stop   anetbbs-finger, \
+    /bin/systemctl restart anetbbs-finger, \
+    /bin/systemctl start  anetbbs-binkp, \
+    /bin/systemctl stop   anetbbs-binkp, \
+    /bin/systemctl restart anetbbs-binkp
+
+# Disable the sudoers_audit plugin for anetbbs commands. On some VPS /
+# container hosts (LXC, OpenVZ) the Linux audit subsystem is unavailable
+# and sudo fails with "unable to change to root gid / error initializing
+# audit plugin sudoers_audit" before it even runs our script. !log_input
+# and !log_output suppress the other plugin that tries to open a pty.
+Defaults!ANETBBS_UPGRADE  !log_input, !log_output
+Defaults!ANETBBS_RESTORE  !log_input, !log_output
+Defaults!ANETBBS_SYSCTL   !log_input, !log_output
+
+__SERVICE_USER__ ALL=(root) NOPASSWD: ANETBBS_SYSCTL, ANETBBS_UPGRADE, ANETBBS_RESTORE

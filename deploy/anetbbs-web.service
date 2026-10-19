@@ -1,0 +1,21 @@
+[Unit]
+Description=ANetBBS Web Application (eventlet WSGI)
+After=network.target
+
+[Service]
+Type=simple
+User=anetbbs
+Group=anetbbs
+WorkingDirectory=/opt/anetbbs
+EnvironmentFile=/opt/anetbbs/.env
+# CAP_NET_BIND_SERVICE lets the unprivileged service user bind to the
+# privileged ports MSP (TCP/18) and SYSTAT/ActiveUser (UDP/11).
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+ExecStart=/opt/anetbbs/venv/bin/python /opt/anetbbs/deploy/serve.py
+KillMode=mixed
+TimeoutStopSec=20
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

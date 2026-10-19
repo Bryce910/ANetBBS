@@ -1,0 +1,474 @@
+{% extends "base.html" %}
+{% block title %}{% if game %}Edit{% else %}Add{% endif %} Game — Admin — {{ config.BBS_NAME }}{% endblock %}
+
+{% block extra_css %}
+<style>
+    .game-type-section { display:none; }
+    .form-check-input { accent-color: #00ff00; }
+    .section-header {
+        color: #00ff00;
+        border-bottom: 1px solid #007700;
+        padding-bottom: 4px;
+        margin: 16px 0 10px;
+        font-weight: bold;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <h3>{% if game %}<i class="bi bi-pencil"></i> Edit: {{ game.name }}
+        {% else %}<i class="bi bi-plus-circle"></i> Add New Game{% endif %}</h3>
+    <a href="{{ url_for('games_admin.list_games') }}" class="btn btn-primary btn-sm">
+        <i class="bi bi-arrow-left"></i> Back
+    </a>
+</div>
+
+<form method="post">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    {{ form.hidden_tag() }}
+
+    {% if form.errors %}
+    <div class="alert alert-danger">
+        <strong><i class="bi bi-exclamation-triangle"></i> Save failed — fix the errors below:</strong>
+        <ul class="mb-0">
+            {% for field_name, errs in form.errors.items() %}
+                {% for err in errs %}
+                <li><code>{{ field_name }}</code>: {{ err }}</li>
+                {% endfor %}
+            {% endfor %}
+        </ul>
+    </div>
+    {% endif %}
+
+    <!-- Common Fields -->
+    <div class="section-header"><i class="bi bi-info-circle"></i> General</div>
+    <div class="row g-3 mb-2">
+        <div class="col-md-6">
+            {{ form.name.label(class="form-label") }}
+            {{ form.name(class="form-control") }}
+        </div>
+        <div class="col-md-6">
+            {{ form.slug.label(class="form-label") }}
+            {{ form.slug(class="form-control") }}
+            <small style="color:#007700;">URL-safe name, e.g. "my-game"</small>
+        </div>
+        <div class="col-12">
+            {{ form.description.label(class="form-label") }}
+            {{ form.description(class="form-control", rows=3) }}
+        </div>
+        <div class="col-md-3">
+            {{ form.category.label(class="form-label") }}
+            {{ form.category(class="form-control") }}
+            <small style="color:#007700;"><a href="{{ url_for('games_admin.list_categories') }}" style="color:#007700;">Manage categories</a></small>
+        </div>
+        <div class="col-md-3">
+            {{ form.game_type.label(class="form-label") }}
+            {{ form.game_type(class="form-control", id="game_type_select") }}
+        </div>
+        <div class="col-md-3">
+            {{ form.icon.label(class="form-label") }}
+            {{ form.icon(class="form-control", placeholder="bi-controller") }}
+        </div>
+        <div class="col-md-3">
+            {{ form.min_access_level.label(class="form-label") }}
+            {{ form.min_access_level(class="form-control") }}
+            <small style="color:#007700;">0=all, 10=user, 50=power, 100=sysop</small>
+        </div>
+        <div class="col-md-3">
+            {{ form.max_nodes.label(class="form-label") }}
+            {{ form.max_nodes(class="form-control") }}
+        </div>
+        <div class="col-md-3">
+            {{ form.sort_order.label(class="form-label") }}
+            {{ form.sort_order(class="form-control") }}
+        </div>
+        <div class="col-md-3 d-flex align-items-end pb-1">
+            <div class="form-check">
+                {{ form.is_active(class="form-check-input") }}
+                {{ form.is_active.label(class="form-check-label") }}
+            </div>
+        </div>
+        <div class="col-md-3 d-flex align-items-end pb-1">
+            <div class="form-check">
+                {{ form.is_multiplayer(class="form-check-input") }}
+                {{ form.is_multiplayer.label(class="form-check-label") }}
+            </div>
+        </div>
+        <div class="col-md-3 d-flex align-items-end pb-1">
+            <div class="form-check">
+                {{ form.web_enabled(class="form-check-input") }}
+                {{ form.web_enabled.label(class="form-check-label") }}
+            </div>
+        </div>
+        <div class="col-md-3 d-flex align-items-end pb-1">
+            <div class="form-check">
+                {{ form.terminal_enabled(class="form-check-input") }}
+                {{ form.terminal_enabled.label(class="form-check-label") }}
+            </div>
+        </div>
+        <div class="col-md-3 d-flex align-items-end pb-1">
+            <div class="form-check">
+                {{ form.share_scores_interbbs(class="form-check-input") }}
+                {{ form.share_scores_interbbs.label(class="form-check-label") }}
+            </div>
+        </div>
+    </div>
+    <div class="row g-3 mb-3">
+        <div class="col-md-12">
+            <small style="color:#007700;">
+                Web/Terminal switches only matter for games with a real,
+                independent implementation on both front ends (currently just the
+                Ebook Reader) — turning one off there won't affect anything else.
+            </small>
+        </div>
+    </div>
+
+    <!-- DOS Door -->
+    <div id="section_door_dos" class="game-type-section">
+        <div class="section-header"><i class="bi bi-terminal"></i> DOS Door Settings</div>
+        <div class="row g-3 mb-2">
+            <div class="col-md-6">
+                {{ form.executable_path.label(class="form-label") }}
+                {{ form.executable_path(class="form-control", placeholder="/games/LORD/LORD.EXE") }}
+            </div>
+            <div class="col-md-6">
+                {{ form.working_directory.label(class="form-label") }}
+                {{ form.working_directory(class="form-control") }}
+            </div>
+            <div class="col-md-6">
+                {{ form.command_line_args.label(class="form-label") }}
+                {{ form.command_line_args(class="form-control") }}
+            </div>
+            <div class="col-md-3">
+                {{ form.drop_file_type.label(class="form-label") }}
+                {{ form.drop_file_type(class="form-control") }}
+            </div>
+            <div class="col-md-3">
+                {{ form.drop_file_path.label(class="form-label") }}
+                {{ form.drop_file_path(class="form-control") }}
+            </div>
+            <div class="col-md-3 d-flex align-items-end pb-1">
+                <div class="form-check">
+                    {{ form.use_dosbox(class="form-check-input") }}
+                    {{ form.use_dosbox.label(class="form-check-label") }}
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- dosemu2 Door -->
+    <div id="section_door_dosemu" class="game-type-section">
+        <div class="section-header"><i class="bi bi-terminal"></i> dosemu2 Door Settings</div>
+        <div class="row g-3 mb-2">
+            <div class="col-md-6">
+                {{ form.executable_path.label(class="form-label") }}
+                {{ form.executable_path(class="form-control", placeholder="/games/TW2002/TW.EXE") }}
+            </div>
+            <div class="col-md-6">
+                {{ form.working_directory.label(class="form-label") }}
+                {{ form.working_directory(class="form-control", placeholder="/games/TW2002/") }}
+            </div>
+            <div class="col-md-6">
+                {{ form.command_line_args.label(class="form-label") }}
+                {{ form.command_line_args(class="form-control") }}
+            </div>
+            <div class="col-md-3">
+                {{ form.drop_file_type.label(class="form-label") }}
+                {{ form.drop_file_type(class="form-control") }}
+            </div>
+            <div class="col-md-3">
+                {{ form.drop_file_path.label(class="form-label") }}
+                {{ form.drop_file_path(class="form-control") }}
+            </div>
+        </div>
+        <div class="row g-3 mb-2">
+            <div class="col-12">
+                <div class="form-check">
+                    {{ form.needs_fossil_driver(class="form-check-input") }}
+                    {{ form.needs_fossil_driver.label(class="form-check-label") }}
+                    <small class="text-muted d-block">Only enable if this game requires a FOSSIL serial driver loaded before launch. Do NOT enable for TW2002 — dosemu2 virtual COM1 conflicts with FOSSIL drivers.</small>
+                </div>
+            </div>
+        </div>
+        <div class="row g-3 mb-2">
+            <div class="col-12">
+                <small class="text-muted">
+                    Drives inside DOS: <strong>G:</strong> = FOSSIL bundle,
+                    <strong>H:</strong> = game dir, <strong>I:</strong> = per-node temp (drop files).
+                    Set your game's drop-file path to <code>I:\</code> in its config.
+                    Requires dosemu2 (<code>sudo apt install dosemu2</code> on
+                    Debian/Ubuntu; on Fedora/RHEL enable RPM Fusion or a COPR
+                    providing it, then <code>dnf install dosemu2</code>; on
+                    Arch it's AUR-only, <code>yay -S dosemu2</code>; on
+                    openSUSE check the Packman repo or build from source).
+                </small>
+            </div>
+        </div>
+    </div>
+
+    <!-- Native Door -->
+    <div id="section_door_native" class="game-type-section">
+        <div class="section-header"><i class="bi bi-cpu"></i> Native Door Settings</div>
+        <div class="row g-3 mb-2">
+            <div class="col-md-6">
+                {{ form.executable_path.label(class="form-label") }}
+                {{ form.executable_path(class="form-control") }}
+            </div>
+            <div class="col-md-6">
+                {{ form.working_directory.label(class="form-label") }}
+                {{ form.working_directory(class="form-control") }}
+            </div>
+            <div class="col-md-6">
+                {{ form.command_line_args.label(class="form-label") }}
+                {{ form.command_line_args(class="form-control") }}
+            </div>
+            <div class="col-md-3">
+                {{ form.drop_file_type.label(class="form-label") }}
+                {{ form.drop_file_type(class="form-control") }}
+            </div>
+            <div class="col-md-3">
+                {{ form.drop_file_path.label(class="form-label") }}
+                {{ form.drop_file_path(class="form-control") }}
+            </div>
+        </div>
+    </div>
+
+    <!-- Mystic Python -->
+    <div id="section_door_mystic" class="game-type-section">
+        <div class="section-header"><i class="bi bi-filetype-py"></i> Mystic BBS Python Settings</div>
+        <div class="row g-3 mb-2">
+            <div class="col-md-8">
+                {{ form.mystic_script_path.label(class="form-label") }}
+                {{ form.mystic_script_path(class="form-control", placeholder="/games/mygame.mpy") }}
+            </div>
+        </div>
+    </div>
+
+    <!-- Mystic Pascal MPS -->
+    <div id="section_door_mystic_mps" class="game-type-section">
+        <div class="section-header"><i class="bi bi-file-earmark-binary"></i> Mystic BBS Pascal Script (.mps) Settings</div>
+        <div class="row g-3 mb-2">
+            <div class="col-md-8">
+                {{ form.mystic_script_path.label(text="Mystic Script Path (.mps/.mpx)", class="form-label") }}
+                {{ form.mystic_script_path(class="form-control", placeholder="/games/dopewars.mps") }}
+                <small style="color:#007700;">Requires the Mystic BBS runtime (<code>mystic</code>) installed on the server.
+                Set <code>MYSTIC_BBS_PATH</code> env var if it is not at <code>/usr/local/bin/mystic</code>.</small>
+            </div>
+            <div class="col-md-4">
+                {{ form.working_directory.label(class="form-label") }}
+                {{ form.working_directory(class="form-control", placeholder="/opt/mystic") }}
+                <small class="text-muted">Defaults to the script's own directory. Set this to your real
+                Mystic BBS install directory so the script can find <code>mystic.dat</code> there
+                (confirmed live: fails with "Unable to read mystic.dat" when run from outside the
+                actual install directory).</small>
+            </div>
+        </div>
+        <div class="row g-3 mb-2">
+            <div class="col-md-8">
+                {{ form.command_line_args.label(text="Mystic Username / Password", class="form-label") }}
+                {{ form.command_line_args(class="form-control", placeholder="@USER@ mypassword") }}
+                <small class="text-muted">Format: <code>USERNAME PASSWORD</code>. Mystic requires a real,
+                already-created local user account to run a script under — there's no anonymous mode.
+                <code>@USER@</code> in the username substitutes the real ANetBBS caller's own username,
+                but only works if you've actually created a matching Mystic account for every caller
+                ahead of time. For most doors, a single shared account (e.g. a dedicated
+                <code>anetbbs</code> service user — fixed name, no <code>@USER@</code>) is simpler.</small>
+            </div>
+        </div>
+    </div>
+
+    <!-- Synchronet JS -->
+    <div id="section_door_synchronet" class="game-type-section">
+        <div class="section-header"><i class="bi bi-filetype-js"></i> Synchronet JS Settings</div>
+        <div class="row g-3 mb-2">
+            <div class="col-md-6">
+                {{ form.synchronet_script_path.label(class="form-label") }}
+                {{ form.synchronet_script_path(class="form-control", placeholder="/games/galaga.js") }}
+            </div>
+            <div class="col-md-6">
+                {{ form.synchronet_exec_dir.label(class="form-label") }}
+                {{ form.synchronet_exec_dir(class="form-control", placeholder="/sbbs/exec") }}
+                <small style="color:#007700;">Path to Synchronet stdlib (frame.js, etc.)</small>
+            </div>
+        </div>
+        <div class="row g-3 mb-2">
+            <div class="col-md-6">
+                {{ form.msgbase_area_id.label(class="form-label") }}
+                <select name="msgbase_area_id" id="msgbase_area_id" class="form-control">
+                    <option value="0" {% if not form.msgbase_area_id.data %}selected{% endif %}>— None —</option>
+                    {% for net_name, areas in msgbase_area_groups %}
+                    <optgroup label="{{ net_name }}">
+                        {% for area_id, area_name in areas %}
+                        <option value="{{ area_id }}" {% if form.msgbase_area_id.data == area_id %}selected{% endif %}>{{ area_name }}</option>
+                        {% endfor %}
+                    </optgroup>
+                    {% endfor %}
+                </select>
+                <small style="color:#007700;">Only for doors that call real Synchronet MsgBase (e.g. Minesweeper's InterBBS DOVE-Net/FidoNet score sharing) — leave as "None" for every other door. Grouped by network — DOVE-Net's areas won't be buried among a large FidoNet arealist.</small>
+            </div>
+        </div>
+    </div>
+
+    <!-- In-Browser DOS Game (js-dos) -->
+    <div id="section_door_dos_browser" class="game-type-section">
+        <div class="section-header"><i class="bi bi-joystick"></i> In-Browser DOS Game Settings</div>
+        <div class="row g-3 mb-2">
+            <div class="col-md-8">
+                {{ form.web_game_url.label(class="form-label") }}
+                {{ form.web_game_url(class="form-control", placeholder="/games/dos-data/doom.zip") }}
+                <small style="color:#007700;">Path served by the <code>/games/dos-data/</code> route, e.g. <code>/games/dos-data/doom.zip</code></small>
+            </div>
+            <div class="col-md-4">
+                {{ form.command_line_args.label(class="form-label") }}
+                {{ form.command_line_args(class="form-control", placeholder="DOOM.EXE") }}
+                <small style="color:#007700;">DOS executable (reference only — autoexec is in the ZIP's dosbox.conf)</small>
+            </div>
+        </div>
+    </div>
+
+    <!-- Web Game -->
+    <div id="section_builtin_web" class="game-type-section">
+        <div class="section-header"><i class="bi bi-browser-chrome"></i> Web Game Settings</div>
+        <div class="row g-3 mb-2">
+            <div class="col-md-4">
+                {{ form.web_game_module.label(class="form-label") }}
+                {{ form.web_game_module(class="form-control", placeholder="hangman") }}
+                <small style="color:#007700;">Template module name (hangman, snake, etc.)</small>
+            </div>
+            <div class="col-md-8">
+                {{ form.web_game_url.label(class="form-label") }}
+                {{ form.web_game_url(class="form-control", placeholder="https://…") }}
+            </div>
+        </div>
+    </div>
+
+    <!-- Remote rlogin game server -->
+    <div id="section_door_rlogin" class="game-type-section">
+        <div class="section-header"><i class="bi bi-cloud-arrow-up"></i> A-Net Game Server (rlogin)</div>
+        <div class="row g-3 mb-2">
+            <div class="col-md-6">
+                <label class="form-label" for="executable_path">Server (host:port)</label>
+                {{ form.executable_path(class="form-control", placeholder="game.a-net-online.lol:513", id="executable_path") }}
+                <small style="color:#007700;">Default rlogin port is 513.</small>
+            </div>
+            <div class="col-md-6">
+                <label class="form-label" for="command_line_args">User-template &nbsp;PASSWORD&nbsp; [TERMINAL]</label>
+                {{ form.command_line_args(class="form-control", placeholder="@USER@ 8hf30n^! [xtrn=LORD408]", id="command_line_args") }}
+                <small style="color:#007700;">
+                    Three space-separated fields: <code>USER_TEMPLATE PASSWORD [TERMINAL]</code>.
+                </small>
+            </div>
+        </div>
+        <div class="row g-3 mb-2">
+            <div class="col-md-6">
+                <label class="form-label" for="rlogin_bbs_tag">BBS Tag (optional)</label>
+                {{ form.rlogin_bbs_tag(class="form-control", placeholder="ANET", id="rlogin_bbs_tag") }}
+                <small style="color:#007700;">
+                    A short tag the remote server uses to namespace users by source
+                    BBS. Leave blank if the remote server doesn't use tags.
+                </small>
+            </div>
+        </div>
+        <div class="row g-3 mb-2">
+            <div class="col-md-12">
+                <small style="color:#444;">
+                    <strong>About the BBS tag.</strong> Game servers namespace
+                    inbound users by source BBS. Set your tag in the <strong>BBS
+                    Tag</strong> field above (just the letters, e.g. <code>ANET</code>)
+                    and the BBS builds the actual suffix for you, sending it as
+                    <em>username-ANET</em> (hyphen-joined, no space) — the
+                    Mystic-style convention, not Synchronet's own native
+                    <code>?rlogin -s-TAG</code> client convention (which uses a space
+                    + <code>-s-</code> prefix and only applies BBS-to-BBS between two
+                    real Synchronet installs). It's a separate field from
+                    User-template purely so you don't have to hand-assemble a
+                    combined string. Coordinate the tag + password with the remote sysop.
+                    <br><br>
+                    <strong>Tokens in USER_TEMPLATE:</strong>
+                    <code>@USER@</code> → BBS username,
+                    <code>@ALIAS@</code> → display name,
+                    <code>%U</code> / <code>%u</code> → username (Mystic/Synchronet style).
+                    <br>
+                    <strong>TERMINAL</strong> is optional. Set to
+                    <code>xtrn=GAMENAME</code> (e.g., <code>xtrn=LORD408</code>) to
+                    drop the user straight into a specific door instead of the
+                    remote BBS's door menu. Supported door codes are listed on the
+                    server's website.
+                    <br><br>
+                    <strong>Examples for game.a-net-online.lol</strong>
+                    (BBS Tag: <code>ANET</code>; replace <code>YOUR_PASS</code> with
+                    the password the remote sysop assigned to your BBS):
+                    <ul style="margin: 4px 0 0 20px; padding: 0;">
+                        <li>Door menu: <code>@USER@ YOUR_PASS</code></li>
+                        <li>Direct LORD: <code>@USER@ YOUR_PASS xtrn=LORD408</code></li>
+                        <li>Direct ASSASSIN: <code>@USER@ YOUR_PASS xtrn=ASSASSIN</code></li>
+                        <li>RPG category menu: <code>@USER@ YOUR_PASS xtrn_sec=RPG</code></li>
+                    </ul>
+                </small>
+            </div>
+        </div>
+    </div>
+
+    <!-- Remote telnet game server -->
+    <div id="section_door_telnet" class="game-type-section">
+        <div class="section-header"><i class="bi bi-terminal"></i> Telnet Door Server</div>
+        <div class="row g-3 mb-2">
+            <div class="col-md-6">
+                <label class="form-label" for="executable_path_telnet">Server (host:port)</label>
+                {{ form.executable_path(class="form-control", placeholder="twgs.example.com:23", id="executable_path_telnet") }}
+                <small style="color:#007700;">Default telnet port is 23.</small>
+            </div>
+        </div>
+        <div class="row g-3 mb-2">
+            <div class="col-md-12">
+                <small style="color:#444;">
+                    Plain telnet, no pre-authentication — the user logs in
+                    interactively on the remote side exactly as they would
+                    connecting with any telnet client directly. This is the
+                    right type for external game servers that only offer
+                    telnet, like a <strong>TWGS</strong> (Trade Wars Game
+                    Server) instance. No user template or password needed
+                    here — <code>Command Line Args</code> above is unused
+                    for this door type.
+                </small>
+            </div>
+        </div>
+    </div>
+
+    <div class="mt-4">
+        {{ form.submit(class="btn btn-primary") }}
+        <a href="{{ url_for('games_admin.list_games') }}" class="btn btn-primary ms-2">Cancel</a>
+    </div>
+</form>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+(function () {
+    var sections = ['door_dos', 'door_dosemu', 'door_dos_browser', 'door_native', 'door_mystic', 'door_mystic_mps', 'door_synchronet', 'builtin_web', 'door_rlogin', 'door_telnet'];
+    var sel = document.getElementById('game_type_select');
+
+    function showSection(type) {
+        // Several fields (executable_path, working_directory, command_line_args,
+        // drop_file_*) are duplicated across multiple game-type sections so each
+        // type can pre-fill its own placeholder. CSS-hiding alone doesn't stop
+        // browsers submitting hidden inputs, so the FIRST matching field wins
+        // on the server. Disable inputs in inactive sections so only the active
+        // section's values get submitted.
+        sections.forEach(function(s) {
+            var el = document.getElementById('section_' + s);
+            if (!el) return;
+            var active = (s === type);
+            el.style.display = active ? 'block' : 'none';
+            el.querySelectorAll('input, select, textarea').forEach(function(inp) {
+                inp.disabled = !active;
+            });
+        });
+    }
+
+    sel.addEventListener('change', function() { showSection(sel.value); });
+    showSection(sel.value);
+})();
+</script>
+{% endblock %}

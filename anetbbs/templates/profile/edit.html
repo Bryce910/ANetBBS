@@ -1,0 +1,286 @@
+{% extends "base.html" %}
+
+{% block title %}Edit Profile - {{ config.BBS_NAME }}{% endblock %}
+
+{% block content %}
+<div class="bbs-header">
+    <h1><i class="bi bi-person-gear"></i> Edit Profile</h1>
+</div>
+
+{# Avatar-remove form lives OUTSIDE the main profile form. HTML forbids
+   nesting <form> tags — browsers auto-close the outer form at the inner
+   <form>, which historically dropped the Privacy/Signature/Theme/Submit
+   fields out of the profile form entirely. The Remove Avatar button below
+   uses the HTML5 `form="remove_avatar_form"` attribute to submit this
+   hidden form from its visual position inside the Avatar card. #}
+{% if avatar %}
+<form id="remove_avatar_form" method="post" action="{{ url_for('profile.remove_avatar') }}" class="d-none">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+</form>
+{% endif %}
+
+<form method="post" enctype="multipart/form-data">
+    {{ form.hidden_tag() }}
+
+    <div class="row g-3">
+        <!-- Basic Info -->
+        <div class="col-md-6">
+            <div class="card">
+                <div class="card-header"><i class="bi bi-person"></i> Basic Info</div>
+                <div class="card-body">
+                    {% if field_config.display_name %}
+                    <div class="mb-3">
+                        {{ form.display_name.label(class="form-label") }}
+                        {{ form.display_name(class="form-control", placeholder="Your display name") }}
+                    </div>
+                    {% endif %}
+                    <div class="mb-3">
+                        {{ form.email.label(class="form-label") }}
+                        {{ form.email(class="form-control") }}
+                        {% for e in form.email.errors %}<div class="text-danger">{{ e }}</div>{% endfor %}
+                    </div>
+                    {% if field_config.bio %}
+                    <div class="mb-3">
+                        {{ form.bio.label(class="form-label") }}
+                        {{ form.bio(class="form-control", rows="4", maxlength="500", id="bio-textarea") }}
+                        <small><span id="bio-count">0</span>/500 characters</small>
+                    </div>
+                    {% endif %}
+                    {% if field_config.location %}
+                    <div class="mb-3">
+                        {{ form.location.label(class="form-label") }}
+                        {{ form.location(class="form-control", placeholder="City, Country") }}
+                    </div>
+                    {% endif %}
+                    {% if field_config.website %}
+                    <div class="mb-3">
+                        {{ form.website.label(class="form-label") }}
+                        {{ form.website(class="form-control", placeholder="https://...") }}
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+
+        <!-- Avatar -->
+        <div class="col-md-6">
+            <div class="card mb-3">
+                <div class="card-header"><i class="bi bi-image"></i> Avatar</div>
+                <div class="card-body">
+                    <div class="text-center mb-3">
+                        {% if avatar %}
+                            <img src="{{ avatar }}" alt="Current Avatar" class="rounded-circle" style="width:100px;height:100px;object-fit:cover;border:2px solid var(--theme-primary);">
+                        {% else %}
+                            <i class="bi bi-person-circle" style="font-size:5rem;"></i>
+                        {% endif %}
+                    </div>
+                    <div class="mb-3">
+                        {{ form.avatar_url.label(class="form-label") }}
+                        {{ form.avatar_url(class="form-control", placeholder="https://example.com/avatar.jpg") }}
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Or Upload Avatar</label>
+                        {{ form.avatar_file(class="form-control") }}
+                        {% for e in form.avatar_file.errors %}<div class="text-danger">{{ e }}</div>{% endfor %}
+                        <small>Max 2MB. JPG, PNG, GIF, WebP allowed.</small>
+                    </div>
+                    {% if avatar %}
+                    <button type="submit" form="remove_avatar_form" class="btn btn-sm btn-danger"><i class="bi bi-trash"></i> Remove Avatar</button>
+                    {% endif %}
+                </div>
+            </div>
+
+            {% if field_config.show_email or field_config.date_of_birth %}
+            <!-- Privacy -->
+            <div class="card mb-3">
+                <div class="card-header"><i class="bi bi-shield"></i> Privacy</div>
+                <div class="card-body">
+                    {% if field_config.show_email %}
+                    <div class="mb-3 form-check">
+                        {{ form.show_email(class="form-check-input") }}
+                        {{ form.show_email.label(class="form-check-label") }}
+                    </div>
+                    {% endif %}
+                    {% if field_config.date_of_birth %}
+                    <div class="mb-3">
+                        {{ form.date_of_birth.label(class="form-label") }}
+                        {{ form.date_of_birth(class="form-control") }}
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+            {% endif %}
+
+            <!-- Security -->
+            <div class="card mb-3">
+                <div class="card-header"><i class="bi bi-shield-lock"></i> Account Security</div>
+                <div class="card-body">
+                    <a href="{{ url_for('profile.change_password') }}" class="btn btn-outline-secondary btn-sm w-100 mb-2">
+                        <i class="bi bi-key"></i> Change Password
+                    </a>
+                    <a href="{{ url_for('profile.security_questions') }}" class="btn btn-outline-secondary btn-sm w-100">
+                        <i class="bi bi-question-circle"></i> Security Questions
+                        <span class="text-muted">(for password recovery)</span>
+                    </a>
+                </div>
+            </div>
+        </div>
+
+        {% if field_config.signature %}
+        <!-- Signature -->
+        <div class="col-12">
+            <div class="card mb-3">
+                <div class="card-header"><i class="bi bi-pen"></i> Forum Signature</div>
+                <div class="card-body">
+                    {{ form.signature(class="form-control", rows="3", maxlength="200", id="sig-textarea") }}
+                    <small><span id="sig-count">0</span>/200 characters</small>
+                </div>
+            </div>
+        </div>
+        {% endif %}
+
+        {% if field_config.tagline %}
+        <!-- FTN Tagline -->
+        <div class="col-12">
+            <div class="card mb-3">
+                <div class="card-header"><i class="bi bi-quote"></i> FTN Tagline</div>
+                <div class="card-body">
+                    {{ form.tagline(class="form-control", maxlength="160") }}
+                    <small class="text-muted">{{ form.tagline.description }}</small>
+                </div>
+            </div>
+        </div>
+
+        <!-- Echomail / Netmail identity -->
+        <div class="col-12">
+            <div class="card mb-3">
+                <div class="card-header"><i class="bi bi-fingerprint"></i> Echomail / Netmail Identity</div>
+                <div class="card-body">
+                    <div class="mb-3">
+                        {{ form.real_name.label(class="form-label") }}
+                        {{ form.real_name(class="form-control", maxlength="100") }}
+                        {% if form.real_name.description %}
+                        <small class="text-muted">{{ form.real_name.description }}</small>
+                        {% endif %}
+                    </div>
+                    <div class="mb-1">
+                        {{ form.echomail_name_pref.label(class="form-label") }}
+                        {{ form.echomail_name_pref(class="form-select") }}
+                    </div>
+                    {% if form.echomail_name_pref.description %}
+                    <small class="text-muted">{{ form.echomail_name_pref.description }}</small>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+        {% endif %}
+
+        <!-- Theme -->
+        <div class="col-12">
+            <div class="card mb-3">
+                <div class="card-header"><i class="bi bi-palette"></i> Theme</div>
+                <div class="card-body">
+                    <div class="mb-3">
+                        {{ form.theme_id.label(class="form-label") }}
+                        {{ form.theme_id(class="form-select") }}
+                    </div>
+                    {% if themes %}
+                    <div class="row g-2">
+                        {% for theme in themes %}
+                        {% set vars = theme.css_variables | from_json %}
+                        <div class="col-md-2 col-4">
+                            <div class="p-2 text-center rounded theme-swatch" data-theme-id="{{ theme.id | int }}" style="background-color:{{ vars.get('--theme-bg', '#1a1a1a') }};border:2px solid {{ vars.get('--theme-primary', '#00ff00') }};font-family:monospace;cursor:pointer;">
+                                <span style="color:{{ vars.get('--theme-primary', '#00ff00') }};font-size:0.75rem;">{{ theme.display_name }}</span>
+                            </div>
+                        </div>
+                        {% endfor %}
+                    </div>
+                    <script>
+                    document.querySelectorAll('.theme-swatch').forEach(function(el) {
+                        el.addEventListener('click', function() {
+                            document.getElementById('theme_id').value = this.dataset.themeId;
+                        });
+                    });
+                    </script>
+                    {% endif %}
+                    <div class="mt-2">
+                        <a href="{{ url_for('profile.themes') }}" class="btn btn-sm btn-primary"><i class="bi bi-eye"></i> Preview All Themes</a>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Terminal Capabilities -->
+        <div class="col-12">
+            <div class="card mb-3">
+                <div class="card-header"><i class="bi bi-terminal"></i> Terminal Capabilities</div>
+                <div class="card-body">
+                    <div class="mb-1">
+                        {{ form.sixel_mode.label(class="form-label") }}
+                        {{ form.sixel_mode(class="form-select") }}
+                    </div>
+                    {% if form.sixel_mode.description %}
+                    <small class="text-muted">{{ form.sixel_mode.description }}</small>
+                    {% endif %}
+                    <div class="mb-1 mt-3">
+                        {{ form.cursor_style.label(class="form-label") }}
+                        {{ form.cursor_style(class="form-select") }}
+                    </div>
+                    {% if form.cursor_style.description %}
+                    <small class="text-muted">{{ form.cursor_style.description }}</small>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+
+    {% if custom_fields_list %}
+    <div class="card mb-3">
+        <div class="card-header"><i class="bi bi-card-list"></i> Additional Info</div>
+        <div class="card-body">
+            <div class="row g-2">
+            {% for cf in custom_fields_list %}
+                <div class="col-md-6 mb-2">
+                    <label class="form-label small">{{ cf.label }}{% if cf.required %} <span class="text-danger">*</span>{% endif %}</label>
+                    {% set val = custom_values.get(cf.id, '') %}
+                    {% if cf.field_type == 'textarea' %}
+                        <textarea name="cf_{{ cf.name }}" class="form-control form-control-sm" rows="3">{{ val }}</textarea>
+                    {% elif cf.field_type == 'select' %}
+                        {% set choices = cf.choices | from_json if cf.choices else [] %}
+                        <select name="cf_{{ cf.name }}" class="form-select form-select-sm">
+                            <option value="">-- select --</option>
+                            {% for c in choices %}
+                            <option value="{{ c }}" {% if val == c %}selected{% endif %}>{{ c }}</option>
+                            {% endfor %}
+                        </select>
+                    {% else %}
+                        <input type="{{ 'number' if cf.field_type == 'number' else 'url' if cf.field_type == 'url' else 'text' }}"
+                               name="cf_{{ cf.name }}" class="form-control form-control-sm" value="{{ val }}">
+                    {% endif %}
+                </div>
+            {% endfor %}
+            </div>
+        </div>
+    </div>
+    {% endif %}
+
+    <div class="d-flex gap-2 mb-3">
+        {{ form.submit(class="btn btn-primary") }}
+        <a href="{{ url_for('profile.index') }}" class="btn btn-secondary">Cancel</a>
+        <a href="{{ url_for('profile.change_password') }}" class="btn btn-primary"><i class="bi bi-key"></i> Change Password</a>
+    </div>
+</form>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+function updateCount(textarea, counter) {
+    document.getElementById(counter).textContent = document.getElementById(textarea).value.length;
+}
+document.getElementById('bio-textarea').addEventListener('input', () => updateCount('bio-textarea', 'bio-count'));
+document.getElementById('sig-textarea').addEventListener('input', () => updateCount('sig-textarea', 'sig-count'));
+// Init counts
+updateCount('bio-textarea', 'bio-count');
+updateCount('sig-textarea', 'sig-count');
+</script>
+{% endblock %}

@@ -1,0 +1,479 @@
+{% extends "base.html" %}
+{% block title %}Hub Management — {{ config.BBS_NAME }}{% endblock %}
+
+{% block content %}
+<div class="bbs-header">
+    <h1><i class="bi bi-broadcast"></i> Hub Management</h1>
+    <p>Manage downstream BinkP nodes and QWK nodes connected to this BBS as a hub.</p>
+</div>
+
+<div class="row g-3 mb-4">
+    <div class="col-6 col-md-3">
+        <div class="card text-center">
+            <div class="card-body">
+                <div style="font-size:2rem; color:#00ff00;">{{ binkp_nodes|length }}</div>
+                <div>BinkP Nodes</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-6 col-md-3">
+        <div class="card text-center">
+            <div class="card-body">
+                <div style="font-size:2rem; color:#00ffff;">{{ qwk_nodes|length }}</div>
+                <div>QWK Nodes</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-6 col-md-3">
+        <div class="card text-center">
+            <div class="card-body">
+                <div style="font-size:2rem; color:#ffff00;">{{ pending_hold }}</div>
+                <div>Hold Queue (pending)</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-6 col-md-3">
+        <div class="card text-center">
+            <div class="card-body">
+                <div style="font-size:2rem; color:#aaaaaa;"><i class="bi bi-diagram-3"></i></div>
+                <div>Hub Mode</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row g-3 mb-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header"><i class="bi bi-lightning-charge"></i> Quick Actions</div>
+            <div class="card-body d-flex gap-2 flex-wrap">
+                <a href="{{ url_for('hub_admin.hub_identities') }}" class="btn btn-outline-primary">
+                    <i class="bi bi-diagram-3"></i> Hub Identities
+                </a>
+                <a href="{{ url_for('hub_admin.binkp_nodes') }}" class="btn btn-primary">
+                    <i class="bi bi-hdd-network"></i> BinkP Nodes
+                </a>
+                <a href="{{ url_for('hub_admin.new_binkp_node') }}" class="btn btn-primary">
+                    <i class="bi bi-plus-circle"></i> Add BinkP Node
+                </a>
+                <a href="{{ url_for('hub_admin.qwk_nodes') }}" class="btn btn-primary">
+                    <i class="bi bi-archive"></i> QWK Nodes
+                </a>
+                <a href="{{ url_for('hub_admin.new_qwk_node') }}" class="btn btn-primary">
+                    <i class="bi bi-plus-circle"></i> Add QWK Node
+                </a>
+                <a href="{{ url_for('hub_admin.hold_queue') }}" class="btn btn-warning">
+                    <i class="bi bi-clock-history"></i> Hold Queue
+                    {% if pending_hold %}<span class="badge bg-danger">{{ pending_hold }}</span>{% endif %}
+                </a>
+                <a href="{{ url_for('hub_admin.qwk_node_requests') }}" class="btn btn-{% if pending_requests %}danger{% else %}secondary{% endif %}">
+                    <i class="bi bi-person-plus"></i> Node Requests
+                    {% if pending_requests %}<span class="badge bg-light text-dark">{{ pending_requests }}</span>{% endif %}
+                </a>
+                <a href="{{ url_for('hub_admin.join_requests') }}" class="btn btn-{% if pending_join_requests %}danger{% else %}secondary{% endif %}">
+                    <i class="bi bi-file-earmark-person"></i> Join Requests
+                    {% if pending_join_requests %}<span class="badge bg-light text-dark">{{ pending_join_requests }}</span>{% endif %}
+                </a>
+                <a href="{{ url_for('echomail_admin.dashboard') }}" class="btn btn-secondary">
+                    <i class="bi bi-arrow-left"></i> Echomail Dashboard
+                </a>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% if identities|length > 1 %}
+<div class="row g-3 mb-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header"><i class="bi bi-diagram-3"></i> Hub Identities</div>
+            <div class="card-body p-0">
+                <table class="table table-sm mb-0">
+                    <thead>
+                        <tr>
+                            <th>Identity</th>
+                            <th>BinkP Nodes</th>
+                            <th>QWK Nodes</th>
+                            <th>Status</th>
+                            <th></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for i in identities %}
+                        <tr>
+                            <td>
+                                {{ i.name }}
+                                {% if i.is_default %}<span class="badge bg-secondary">default</span>{% endif %}
+                            </td>
+                            <td>{{ binkp_nodes|selectattr('hub_identity_id', 'equalto', i.id)|list|length }}</td>
+                            <td>{{ qwk_nodes|selectattr('hub_identity_id', 'equalto', i.id)|list|length }}</td>
+                            <td>
+                                {% if i.is_active %}<span class="badge bg-success">active</span>
+                                {% else %}<span class="badge bg-secondary">inactive</span>{% endif %}
+                            </td>
+                            <td class="text-end">
+                                <a href="{{ url_for('hub_admin.edit_hub_identity', identity_id=i.id) }}"
+                                   class="btn btn-sm btn-outline-secondary">Edit</a>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+{% endif %}
+
+<div class="row g-3 mb-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header"><i class="bi bi-gear-wide-connected"></i> Generation &amp; Distribution</div>
+            <div class="card-body">
+                <ul class="nav nav-tabs mb-3" id="genTabs">
+                    <li class="nav-item">
+                        <a class="nav-link {% if gen_tab == 'nodelist' %}active{% endif %}"
+                           href="{{ url_for('hub_admin.index', gen_tab='nodelist') }}#genTabs">
+                            <i class="bi bi-diagram-2"></i> Nodelist
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link {% if gen_tab == 'qwk' %}active{% endif %}"
+                           href="{{ url_for('hub_admin.index', gen_tab='qwk') }}#genTabs">
+                            <i class="bi bi-archive"></i> QWK Packets
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link {% if gen_tab == 'tic' %}active{% endif %}"
+                           href="{{ url_for('hub_admin.index', gen_tab='tic') }}#genTabs">
+                            <i class="bi bi-file-earmark-arrow-up"></i> TIC / File Distribution
+                            {% if hatch_pending %}<span class="badge bg-warning text-dark ms-1">{{ hatch_pending }}</span>{% endif %}
+                            {% if hatch_failed %}<span class="badge bg-danger ms-1">{{ hatch_failed }}</span>{% endif %}
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link {% if gen_tab == 'join' %}active{% endif %}"
+                           href="{{ url_for('hub_admin.index', gen_tab='join') }}#genTabs">
+                            <i class="bi bi-file-earmark-person"></i> Join Form
+                            {% if pending_join_requests %}<span class="badge bg-danger ms-1">{{ pending_join_requests }}</span>{% endif %}
+                        </a>
+                    </li>
+                </ul>
+
+                {% if gen_tab == 'nodelist' %}
+                <p class="text-muted small">
+                    Publishes the ANotherNetwork nodelist into the
+                    <code>ANN.FILES.NODELIST</code> file area, replacing the
+                    prior copy, so peers can pull it like any other file-echo
+                    entry (BinkP/FTP/web).
+                </p>
+                {% if nodelist_event %}
+                <table class="table table-sm">
+                    <tr><th style="width:160px;">Schedule</th>
+                        <td>{{ nodelist_event.schedule_human }}
+                            {% if not nodelist_event.row.is_enabled %}<span class="badge bg-secondary ms-1">disabled</span>{% endif %}
+                            — <a href="{{ url_for('events_admin.edit', eid=nodelist_event.row.id) }}">edit schedule</a>
+                        </td></tr>
+                    <tr><th>Last run</th>
+                        <td>
+                            {% if nodelist_event.row.last_run_at %}
+                                {{ nodelist_event.row.last_run_at|eastern('%Y-%m-%d %H:%M %Z') }}
+                                {% if nodelist_event.row.last_status == 'ok' %}<span class="badge bg-success ms-1">ok</span>
+                                {% else %}<span class="badge bg-danger ms-1">{{ nodelist_event.row.last_status }}</span>{% endif %}
+                            {% else %}
+                                never
+                            {% endif %}
+                        </td></tr>
+                    {% if nodelist_event.row.last_output %}
+                    <tr><th>Last output</th><td><code>{{ nodelist_event.row.last_output }}</code></td></tr>
+                    {% endif %}
+                </table>
+                {% else %}
+                <div class="alert alert-warning">No nodelist-generation event found — enable REGISTRY_MODE_ENABLED and restart to seed it.</div>
+                {% endif %}
+                <form method="post" action="{{ url_for('hub_admin.nodelist_generate_now') }}" class="d-inline">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                    <button type="submit" class="btn btn-primary" {% if not nodelist_event %}disabled{% endif %}>
+                        <i class="bi bi-play-circle"></i> Generate Now
+                    </button>
+                </form>
+
+                <hr>
+                <h6>Direct Download</h6>
+                <p class="text-muted small mb-1">
+                    Auto-publishing into the file area above only covers the
+                    default hub identity. Every active identity's nodelist is
+                    always available directly here:
+                </p>
+                <ul class="mb-0">
+                    {% for i in identities if i.is_active %}
+                    <li>
+                        {{ i.name }}
+                        {% if i.is_default %}<span class="badge bg-secondary">default</span>{% endif %}
+                        — <a href="{{ url_for('hub_admin.nodelist', slug=(i.slug if not i.is_default else None)) }}">
+                            <i class="bi bi-download"></i> download</a>
+                    </li>
+                    {% endfor %}
+                </ul>
+
+                {% elif gen_tab == 'qwk' %}
+                <p class="text-muted small">
+                    QWK packets are already built fresh automatically every
+                    time a node's FTP client connects or hits the download
+                    URL — nothing to schedule. Use "Preview" to build and
+                    download a packet on demand for testing; this does
+                    <strong>not</strong> mark messages as sent, so the node's
+                    real next download is unaffected.
+                </p>
+                {% if qwk_nodes %}
+                <table class="table table-sm table-striped mb-0">
+                    <thead><tr><th>Packet ID</th><th>Name</th><th>Status</th><th></th></tr></thead>
+                    <tbody>
+                        {% for node in qwk_nodes %}
+                        <tr>
+                            <td><a href="{{ url_for('hub_admin.qwk_node_detail', node_id=node.id) }}">{{ node.packet_id }}</a></td>
+                            <td>{{ node.name }}</td>
+                            <td>
+                                {% if node.is_active %}<span class="badge bg-success">active</span>
+                                {% else %}<span class="badge bg-secondary">inactive</span>{% endif %}
+                            </td>
+                            <td>
+                                <a href="{{ url_for('hub_admin.qwk_preview', node_id=node.id) }}" class="btn btn-sm btn-outline-primary">
+                                    <i class="bi bi-eye"></i> Preview
+                                </a>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+                {% else %}
+                <div class="text-center p-3 text-muted">No QWK nodes registered yet.</div>
+                {% endif %}
+
+                {% elif gen_tab == 'tic' %}
+                <p class="text-muted small">
+                    Files uploaded to any ANN.FILES.* area are automatically
+                    queued for TIC distribution to subscribed peers — no
+                    manual step needed. This shows the outbound queue's
+                    current state; delivery happens on the next BinkP poll
+                    per peer.
+                </p>
+                <div class="row g-3">
+                    <div class="col-6 col-md-3">
+                        <div class="card text-center">
+                            <div class="card-body">
+                                <div style="font-size:1.5rem; color:#ffff00;">{{ hatch_pending }}</div>
+                                <div>Pending</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-6 col-md-3">
+                        <div class="card text-center">
+                            <div class="card-body">
+                                <div style="font-size:1.5rem; color:#ff4444;">{{ hatch_failed }}</div>
+                                <div>Failed</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="mt-3">
+                    <a href="{{ url_for('admin.hatch_log') }}" class="btn btn-outline-primary btn-sm">
+                        <i class="bi bi-file-earmark-arrow-up"></i> TIC Out Log
+                    </a>
+                    <a href="{{ url_for('admin.tic_log') }}" class="btn btn-outline-primary btn-sm">
+                        <i class="bi bi-file-earmark-arrow-down"></i> TIC In Log
+                    </a>
+                </div>
+
+                {% elif gen_tab == 'join' %}
+                <p class="text-muted small">
+                    Lets anyone apply to join your network from a public
+                    web page — read the rules, download the full
+                    infopack, check a box confirming they read the
+                    rules, then submit. Applications land in
+                    <a href="{{ url_for('hub_admin.join_requests') }}">Join Requests</a>
+                    for you to review.
+                </p>
+
+                {% if identities|length > 1 %}
+                <form method="get" class="row g-2 mb-3 align-items-end">
+                    <input type="hidden" name="gen_tab" value="join">
+                    <div class="col-auto">
+                        <label class="form-label small mb-0">Editing join form for</label>
+                        <select name="join_identity" class="form-select form-select-sm" onchange="this.form.submit()">
+                            {% for i in identities %}
+                            <option value="{{ i.id }}" {% if i.id == join_identity.id %}selected{% endif %}>{{ i.name }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                </form>
+                {% endif %}
+
+                <form method="post" action="{{ url_for('hub_admin.join_config_save') }}" class="row g-2 mb-3">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                    <input type="hidden" name="hub_identity_id" value="{{ join_identity.id }}">
+                    <div class="col-12">
+                        <div class="form-check">
+                            <input type="checkbox" id="join_enabled" name="enabled" class="form-check-input"
+                                   {% if join_cfg.enabled %}checked{% endif %}>
+                            <label class="form-check-label" for="join_enabled">
+                                Enable the public join form
+                                {% if join_cfg.enabled %}
+                                <a href="{{ url_for('network_join.apply', slug=(join_identity.slug if not join_identity.is_default else None)) }}" target="_blank" class="ms-1">
+                                    <i class="bi bi-box-arrow-up-right"></i> view live
+                                </a>
+                                {% endif %}
+                            </label>
+                        </div>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">Network Name</label>
+                        <input type="text" name="network_name" class="form-control"
+                               value="{{ join_cfg.network_name or '' }}" placeholder="e.g. ANotherNetwork">
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label">BinkP Zone</label>
+                        <input type="number" name="binkp_zone" class="form-control"
+                               value="{{ join_cfg.binkp_zone or '' }}" placeholder="e.g. 1200">
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label">BinkP Net</label>
+                        <input type="number" name="binkp_net" class="form-control"
+                               value="{{ join_cfg.binkp_net or '' }}" placeholder="e.g. 1">
+                        <div class="form-text">Both set: auto-assign sequential node numbers
+                            ({{ join_cfg.binkp_zone or 'Z' }}:{{ join_cfg.binkp_net or 'N' }}/2, /3, ...)
+                            at approval, node 1 reserved for the hub. Leave blank to use
+                            whatever BinkP address the applicant typed in, unchanged.</div>
+                    </div>
+                    <div class="col-12">
+                        <label class="form-label">Intro Text (shown above the rules)</label>
+                        <textarea name="intro_text" class="form-control" rows="2">{{ join_cfg.intro_text or '' }}</textarea>
+                    </div>
+                    <div class="col-12">
+                        <button type="submit" class="btn btn-primary btn-sm">
+                            <i class="bi bi-check"></i> Save Settings
+                        </button>
+                    </div>
+                </form>
+
+                <hr>
+
+                <h6>Infopack</h6>
+                {% if join_cfg.infopack_filename %}
+                <p class="small">
+                    Current: <code>{{ join_cfg.infopack_original_filename }}</code>
+                    ({{ join_cfg.infopack_size }} bytes, uploaded
+                    {{ join_cfg.infopack_uploaded_at|eastern('%Y-%m-%d %H:%M %Z', '?') }})
+                    — <a href="{{ url_for('network_join.download_infopack', slug=(join_identity.slug if not join_identity.is_default else None)) }}">download</a>
+                </p>
+                {% if join_txt_members %}
+                <form method="post" action="{{ url_for('hub_admin.join_pick_rules_file') }}" class="row g-2 align-items-end mb-3">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                    <input type="hidden" name="hub_identity_id" value="{{ join_identity.id }}">
+                    <div class="col-auto">
+                        <label class="form-label small mb-0">Rules text source</label>
+                        <select name="member_name" class="form-select form-select-sm">
+                            {% for member_name, size in join_txt_members %}
+                            <option value="{{ member_name }}" {% if member_name == join_cfg.rules_member_name %}selected{% endif %}>
+                                {{ member_name }} ({{ size }} bytes)
+                            </option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div class="col-auto">
+                        <button type="submit" class="btn btn-sm btn-outline-primary">Use This File</button>
+                    </div>
+                </form>
+                {% endif %}
+                {% if join_cfg.rules_text %}
+                <div class="card mb-3">
+                    <div class="card-header small">Rules preview (from <code>{{ join_cfg.rules_member_name }}</code>)</div>
+                    <div class="card-body" style="max-height:250px; overflow-y:auto;">
+                        <pre style="white-space:pre-wrap; font-family:inherit; font-size:0.85rem;">{{ join_cfg.rules_text }}</pre>
+                    </div>
+                </div>
+                {% endif %}
+                {% else %}
+                <p class="text-muted small">No infopack uploaded yet.</p>
+                {% endif %}
+
+                <form method="post" action="{{ url_for('hub_admin.join_upload_infopack') }}"
+                      enctype="multipart/form-data" class="row g-2 align-items-end">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                    <input type="hidden" name="hub_identity_id" value="{{ join_identity.id }}">
+                    <div class="col-auto">
+                        <input type="file" name="infopack" accept=".zip" class="form-control form-control-sm" required>
+                    </div>
+                    <div class="col-auto">
+                        <button type="submit" class="btn btn-sm btn-primary">
+                            <i class="bi bi-upload"></i> Upload Infopack
+                        </button>
+                    </div>
+                </form>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row g-3">
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header"><i class="bi bi-hdd-network"></i> BinkP Nodes</div>
+            <div class="card-body p-0">
+                {% if binkp_nodes %}
+                <table class="table table-striped mb-0">
+                    <thead><tr><th>Address</th><th>Name</th><th>Status</th><th>Last Seen</th></tr></thead>
+                    <tbody>
+                        {% for node in binkp_nodes %}
+                        <tr>
+                            <td><a href="{{ url_for('hub_admin.binkp_node_detail', node_id=node.id) }}">{{ node.ftn_address }}</a></td>
+                            <td>{{ node.name }}</td>
+                            <td>
+                                {% if node.is_active %}<span class="badge bg-success">active</span>
+                                {% else %}<span class="badge bg-secondary">inactive</span>{% endif %}
+                            </td>
+                            <td style="font-size:0.8rem;">
+                                {% if node.last_seen_at %}{{ node.last_seen_at|eastern('%Y-%m-%d %H:%M') }}{% else %}—{% endif %}
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+                {% else %}
+                <div class="text-center p-4 text-muted">No BinkP nodes registered yet.</div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header"><i class="bi bi-archive"></i> QWK Nodes</div>
+            <div class="card-body p-0">
+                {% if qwk_nodes %}
+                <table class="table table-striped mb-0">
+                    <thead><tr><th>Packet ID</th><th>Name</th><th>Status</th><th>Last Poll</th></tr></thead>
+                    <tbody>
+                        {% for node in qwk_nodes %}
+                        <tr>
+                            <td><a href="{{ url_for('hub_admin.qwk_node_detail', node_id=node.id) }}">{{ node.packet_id }}</a></td>
+                            <td>{{ node.name }}</td>
+                            <td>
+                                {% if node.is_active %}<span class="badge bg-success">active</span>
+                                {% else %}<span class="badge bg-secondary">inactive</span>{% endif %}
+                            </td>
+                            <td style="font-size:0.8rem;">
+                                {% if node.last_poll_at %}{{ node.last_poll_at|eastern('%Y-%m-%d %H:%M') }}{% else %}—{% endif %}
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+                {% else %}
+                <div class="text-center p-4 text-muted">No QWK nodes registered yet.</div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

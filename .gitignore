@@ -1,0 +1,148 @@
+# Backup files
+*.bak
+*.bak.*
+*.orig
+*.backup
+backups/
+*.bak-*
+
+# Dated snapshot files (e.g. main.py-0228-0643)
+*-[0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9]
+*-[0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]
+
+# Runtime data files
+mrc/bridge/data/sessions.json
+mrc/bridge/data/profiles.json
+mrc/bridge/data/*.db
+mrc/bridge/data/*.db-shm
+mrc/bridge/data/*.db-wal
+mrc/bridge/data-*/
+data/mrc/mrc.log
+
+# BBS-door dropfile, regenerated per session by any door game that uses
+# it (not just anetsims) -- runtime state, never source.
+door32.sys
+data/mrc/mrcstats.dat
+
+# Botwars runtime state -- .keep placeholders stay tracked so the
+# (otherwise empty) directories exist on checkout, actual save/score
+# data doesn't.
+vendor/games/botwars/scores.ans
+vendor/games/botwars/botwars_data/*
+vendor/games/botwars/botwars_saves/*
+!vendor/games/botwars/botwars_data/.keep
+!vendor/games/botwars/botwars_saves/.keep
+
+# Config files with secrets -- config/config*.json covers every
+# per-region bridge variant (config.json, config.uk.json, config.ca.json,
+# config.bottomless.json, and any future config.<name>.json), not just
+# the bare default. Found live-server-only config.uk.json/config.ca.json
+# that this glob previously missed (only the bare config.json was
+# covered) -- no leak yet since none of those files exist in this
+# checkout, but the gap meant a future local copy would have shipped in
+# the next release tarball.
+mrc/bridge/config/config*.json
+!mrc/bridge/config/config.example.json
+mrc/bridge/config.json
+mrc_bridge/config.json
+config.json
+
+# js-dos runtime — js-dos.js + wdosbox.js + wdosbox.wasm (~5 MB WASM binary).
+# Run tools/download_jsdos.sh on each install to fetch these.
+anetbbs/static/js-dos/
+
+# Zip archives
+*.zip
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+venv/
+.env
+
+# Editor
+*.swp
+*.swo
+*~
+services/mrc_bridge/data/
+services/mrc_bridge/logs/
+bbs.log*
+*.log
+
+# Runtime data — DB, user uploads, gallery cache, personal pages,
+# SSH host keys, inbound/outbound mail spools, etc. Anything under the
+# top-level data/ is sysop-specific or contains user content. Same for
+# logs/. Anchored to repo root (/data/, not data/) -- an unanchored
+# pattern here previously matched EVERY directory named "data" anywhere
+# in the tree, including anetbbs/data/, which holds bundled shipped
+# content (e.g. default_taglines.txt) that needs to actually ship in
+# release tarballs. Found live: the tagline pool silently never made it
+# into any built tarball, so the seed step always found the file
+# missing and silently skipped seeding -- taglines never worked on any
+# real install. The other data/ dirs that genuinely are runtime state
+# and were relying on the old broad pattern get their own explicit
+# entries below instead.
+/data/
+logs/
+doors/
+gallery-config.json
+anetbbs/games/sbbs_doors/data/
+vendor/games/anetsims/data/
+
+# Synchronet JSON-RPC interbbs doors used for Pi3 test/validation of the
+# compat shim -- NOT shipped in the release. These are real, free, open-
+# source Synchronet doors that come from their own authors, not from
+# ANetBBS; the point was to prove the compat shim runs them correctly,
+# not to redistribute them. A sysop who wants to run one downloads it
+# themselves and drops it at this exact path -- BUNDLED_DOORS in
+# web_app.py auto-detects and registers it if present (must_exist-gated,
+# silently skipped if absent), matching the existing pattern of every
+# other Games-admin-registered door. See docs/26-synchronet-json-rpc-doors.md
+# for the per-door download links and setup steps.
+anetbbs/games/sbbs_doors/bublbogl/
+anetbbs/games/sbbs_doors/chickendelivery/
+anetbbs/games/sbbs_doors/dicewarz2/
+anetbbs/games/sbbs_doors/druglord/
+anetbbs/games/sbbs_doors/fatfish/
+anetbbs/games/sbbs_doors/gooble/
+anetbbs/games/sbbs_doors/gttrivia/
+anetbbs/games/sbbs_doors/jeopardized/
+anetbbs/games/sbbs_doors/lemons/
+anetbbs/games/sbbs_doors/maze/
+anetbbs/games/sbbs_doors/minesweeper/
+anetbbs/games/sbbs_doors/starstocks/
+anetbbs/games/sbbs_doors/startrek/
+anetbbs/games/sbbs_doors/synchronetris/
+anetbbs/games/sbbs_doors/synkroban/
+anetbbs/games/sbbs_doors/thirsty/
+anetbbs/games/sbbs_doors/uberblox/
+
+# Test / cache dirs
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+# Scratch SQLite DBs some test files create directly under tests/ (most
+# use tempfile.TemporaryDirectory() instead, which self-cleans, but a
+# couple of older tests manage their own file path) -- covers the main
+# .db file AND WAL-mode's -wal/-shm companions, so a test run that gets
+# killed before its own cleanup runs can't leave these behind as an
+# untracked, unignored stray that leaks into a release tarball.
+tests/.*.db
+tests/.*.db-wal
+tests/.*.db-shm
+
+# Claude Code's own local session/config state -- never source, never
+# shippable, shouldn't be tracked or packaged under any circumstance.
+.claude/
+
+# OS / IDE noise
+.DS_Store
+.idea/
+.vscode/
+
+.env.*
+!.env.example
+!.env.docker.example

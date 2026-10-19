@@ -1,0 +1,104 @@
+{% extends "base.html" %}
+{% block title %}Echo Areas — {{ config.BBS_NAME }}{% endblock %}
+
+{% block content %}
+<div class="bbs-header">
+    <h1><i class="bi bi-chat-square-text"></i> Echo Areas</h1>
+</div>
+
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <a href="{{ url_for('echomail_admin.dashboard') }}" class="btn btn-primary btn-sm">
+        <i class="bi bi-arrow-left"></i> Dashboard
+    </a>
+    <div>
+        <a href="{{ url_for('echomail_admin.bad_areas') }}" class="btn btn-warning btn-sm me-2">
+            <i class="bi bi-exclamation-triangle"></i> Bad Areas
+        </a>
+        <a href="{{ url_for('echomail_admin.bulk_import') }}" class="btn btn-primary btn-sm me-2">
+            <i class="bi bi-upload"></i> Bulk Import
+        </a>
+        <a href="{{ url_for('echomail_admin.new_area') }}" class="btn btn-primary btn-sm">
+            <i class="bi bi-plus-circle"></i> Add Area
+        </a>
+    </div>
+</div>
+
+{% with messages = get_flashed_messages(with_categories=true) %}
+  {% for cat, msg in messages %}
+    <div class="alert alert-{{ cat }} alert-dismissible fade show" role="alert">
+      {{ msg }}
+      <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+    </div>
+  {% endfor %}
+{% endwith %}
+
+{% if networks %}
+<div class="row g-3">
+  {% for net in networks %}
+  {% set s = stats[net.id] %}
+  <div class="col-12 col-md-6 col-xl-4">
+    <div class="card h-100 border-secondary">
+      <div class="card-header d-flex align-items-center gap-2">
+        {% if net.network_type == 'binkp' %}
+          <span class="badge" style="background:#0dcaf0!important;color:#000!important">BinkP</span>
+        {% else %}
+          <span class="badge" style="background:#fd7e14!important;color:#000!important">QWK</span>
+        {% endif %}
+        <strong class="flex-grow-1">{{ net.name }}</strong>
+        {% if net.is_active %}
+          <span class="badge bg-success">Active</span>
+        {% else %}
+          <span class="badge bg-secondary">Inactive</span>
+        {% endif %}
+      </div>
+      <div class="card-body">
+        {% if net.network_type == 'binkp' %}
+          <div class="small text-muted mb-1">
+            <i class="bi bi-diagram-3"></i>
+            {% if net.our_address %}{{ net.our_address }}{% endif %}
+            {% if net.hub_address %} → {{ net.hub_address }}{% endif %}
+          </div>
+        {% else %}
+          <div class="small text-muted mb-1">
+            <i class="bi bi-hdd-network"></i>
+            Hub ID: {{ net.qwk_hub_id or '—' }}
+            {% if net.qwk_host %} · {{ net.qwk_host }}{% endif %}
+          </div>
+        {% endif %}
+        <div class="row text-center mt-2">
+          <div class="col-4">
+            <div class="fw-bold fs-5">{{ s.total }}</div>
+            <div class="small text-muted">Total</div>
+          </div>
+          <div class="col-4">
+            <div class="fw-bold fs-5 text-success">{{ s.active }}</div>
+            <div class="small text-muted">Active</div>
+          </div>
+          <div class="col-4">
+            <div class="fw-bold fs-5 text-info">{{ s.subscribed }}</div>
+            <div class="small text-muted">Subscribed</div>
+          </div>
+        </div>
+        {% if s.sysop_only %}
+        <div class="small text-muted mt-2">
+          <i class="bi bi-lock"></i> {{ s.sysop_only }} sysop-only area{% if s.sysop_only != 1 %}s{% endif %}
+        </div>
+        {% endif %}
+      </div>
+      <div class="card-footer">
+        <a href="{{ url_for('echomail_admin.network_areas', network_id=net.id) }}"
+           class="btn btn-primary btn-sm w-100">
+          <i class="bi bi-list-check"></i> Manage Areas
+        </a>
+      </div>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% else %}
+<div class="alert alert-info">
+  No echomail networks configured yet.
+  <a href="{{ url_for('echomail_admin.new_network') }}">Add a network</a> to get started.
+</div>
+{% endif %}
+{% endblock %}
