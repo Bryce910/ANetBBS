@@ -1,0 +1,19 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Dokploy deploy
+        run: |
+          curl -fsS --connect-timeout 15 --retry 4 --retry-all-errors --retry-delay 10 -X POST "$DOKPLOY_WEBHOOK" \
+            -H "Content-Type: application/json" \
+            -H "X-GitHub-Event: push" \
+            -d "{\"ref\":\"$GITHUB_REF\",\"head_commit\":{\"id\":\"$GITHUB_SHA\"}}"
+        env:
+          DOKPLOY_WEBHOOK: ${{ secrets.DOKPLOY_WEBHOOK }}
