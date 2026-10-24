@@ -97,7 +97,7 @@ pyopenssl>=24.0.0
 # sysop's local Postfix/Exim/OpenSMTPD, and an outbound submitter that
 # hands fresh mail back to the MTA at 127.0.0.1:25.
 aiosmtpd>=1.4.0
-aiosmtplib>=3.0.0
+aiosmtplib>=5.1.3
 
 # Service Control Center — per-PID CPU% + memory sampling for the
 # live graphs at /admin/control/. Reads /proc, no special privileges.
